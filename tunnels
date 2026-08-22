@@ -331,6 +331,50 @@ def cmd_up(config_name, target_names):
     return 0
 
 
+def matching_entries(entries, config_name, target_names):
+    if config_name == "all":
+        return list(entries)
+    picked = [e for e in entries if e["config"] == config_name]
+    if target_names:
+        picked = [e for e in picked if e["target"] in target_names]
+    return picked
+
+
+def cmd_down(config_name, target_names):
+    entries = live_state()
+    doomed = matching_entries(entries, config_name, target_names)
+    if not doomed:
+        print("nothing to stop")
+        return 0
+    for entry in doomed:
+        try:
+            os.kill(entry["pid"], 15)
+        except OSError:
+            pass
+        print(f"stopped {entry['key']} (port {entry['local_port']})")
+    keys = {e["key"] for e in doomed}
+    save_state([e for e in entries if e["key"] not in keys])
+    return 0
+
+
+def cmd_status():
+    entries = live_state()
+    if not entries:
+        print("no tunnels up")
+        return 0
+    width = max(len(e["key"]) for e in entries)
+    for entry in sorted(entries, key=lambda e: e["key"]):
+        where = entry["cluster"] or f"{entry['remote_host']}:{entry['remote_port']}"
+        age = int(time.time() - entry["started"])
+        print(
+            f"  {entry['key']:<{width}}  :{entry['local_port']:<6} "
+            f"{entry['account']}  {where}  up {age}s"
+        )
+        if entry["context"]:
+            print(f"  {'':<{width}}  kubectl context: {entry['context']}")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")

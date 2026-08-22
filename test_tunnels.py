@@ -214,3 +214,29 @@ def test_wait_for_port_times_out_on_a_closed_port():
         probe.bind(("127.0.0.1", 0))
         closed = probe.getsockname()[1]
     assert tunnels.wait_for_port(closed, timeout=1) is False
+
+
+def test_matching_entries_by_config():
+    entries = [
+        {"key": "dev/db", "config": "dev", "target": "db"},
+        {"key": "prd/db", "config": "prd", "target": "db"},
+    ]
+    picked = tunnels.matching_entries(entries, "dev", [])
+    assert [e["key"] for e in picked] == ["dev/db"]
+
+
+def test_matching_entries_all_returns_everything():
+    entries = [
+        {"key": "dev/db", "config": "dev", "target": "db"},
+        {"key": "prd/db", "config": "prd", "target": "db"},
+    ]
+    assert len(tunnels.matching_entries(entries, "all", [])) == 2
+
+
+def test_matching_entries_by_target_name():
+    entries = [
+        {"key": "dev/db", "config": "dev", "target": "db"},
+        {"key": "dev/eks", "config": "dev", "target": "eks"},
+    ]
+    picked = tunnels.matching_entries(entries, "dev", ["eks"])
+    assert [e["key"] for e in picked] == ["dev/eks"]
