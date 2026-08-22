@@ -165,6 +165,78 @@ def write_kubeconfig_patch(context_name, local_port, host):
         yaml.safe_dump(patched, handle, default_flow_style=False)
 
 
+def aws(profile, region, *args, capture=True):
+    """Run an aws CLI command. Returns parsed JSON when capture is on."""
+    cmd = ["aws", "--profile", profile, "--region", region, "--output", "json", *args]
+    result = subprocess.run(cmd, capture_output=capture, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip() if capture else ""
+        raise TunnelError(f"aws {' '.join(args)} failed: {detail}")
+    if not capture or not result.stdout.strip():
+        return None
+    return json.loads(result.stdout)
+
+
+def ensure_sso(profile, region):
+    """Log in only when the cached token is gone or expired."""
+    probe = subprocess.run(
+        ["aws", "--profile", profile, "sts", "get-caller-identity", "--output", "json"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        return json.loads(probe.stdout)["Account"]
+    print(f"sso token missing or expired for '{profile}'. Logging in...")
+    login = subprocess.run(["aws", "--profile", profile, "sso", "login"])
+    if login.returncode != 0:
+        raise TunnelError(f"aws sso login failed for profile '{profile}'")
+    identity = aws(profile, region, "sts", "get-caller-identity")
+    return identity["Account"]
+
+
+def resolve_jump(profile, region, jump):
+    """Accept an instance id as is. Resolve 'tag:Key=Value' by lookup."""
+    if jump.startswith("i-"):
+        return jump
+    if not jump.startswith("tag:") or "=" not in jump:
+        raise TunnelError(
+            f"jump must be an instance id or 'tag:Key=Value'. Got: {jump}"
+        )
+    key, value = jump[len("tag:"):].split("=", 1)
+    data = aws(
+        profile, region, "ec2", "describe-instances",
+        "--filters", f"Name=tag:{key},Values={value}",
+        "Name=instance-state-name,Values=running",
+        "--query", "Reservations[].Instances[].InstanceId",
+    )
+    ids = data or []
+    if not ids:
+        raise TunnelError(
+            f"no running instance with tag {key}={value} in {region} "
+            f"for profile '{profile}'"
+        )
+    if len(ids) > 1:
+        print(f"warning: {len(ids)} instances match {key}={value}. Using {ids[0]}.")
+    return ids[0]
+
+
+def eks_endpoint(profile, region, cluster):
+    data = aws(
+        profile, region, "eks", "describe-cluster", "--name", cluster,
+        "--query", "cluster.endpoint",
+    )
+    if not data:
+        raise TunnelError(f"cluster '{cluster}' has no endpoint")
+    return endpoint_host(data)
+
+
+def update_kubeconfig(profile, region, cluster, alias):
+    subprocess.run(
+        ["aws", "--profile", profile, "--region", region, "eks", "update-kubeconfig",
+         "--name", cluster, "--alias", alias],
+        check=True, capture_output=True, text=True,
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
