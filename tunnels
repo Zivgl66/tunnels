@@ -93,6 +93,44 @@ def pick_port(preferred):
         return probe.getsockname()[1]
 
 
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except (OSError, TypeError):
+        return False
+    return True
+
+
+def prune_state(entries):
+    """Drop entries whose process is gone. Keeps the state file honest."""
+    return [e for e in entries if pid_alive(e.get("pid"))]
+
+
+def load_state():
+    """Read the state file. A missing or broken file means no tunnels."""
+    try:
+        with STATE_FILE.open() as handle:
+            entries = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    return entries
+
+
+def save_state(entries):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with STATE_FILE.open("w") as handle:
+        json.dump(entries, handle, indent=2)
+
+
+def live_state():
+    """Load, prune, write back, return."""
+    entries = prune_state(load_state())
+    save_state(entries)
+    return entries
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")

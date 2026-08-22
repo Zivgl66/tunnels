@@ -94,3 +94,29 @@ def test_pick_port_falls_back_when_the_preferred_port_is_busy():
 def test_pick_port_with_no_preference_returns_a_usable_port():
     port = tunnels.pick_port(None)
     assert 1024 < port < 65536
+
+
+def test_prune_state_keeps_a_live_pid_and_drops_a_dead_one():
+    live = {"key": "dev/db", "pid": __import__("os").getpid()}
+    dead = {"key": "dev/eks", "pid": 999999}
+    kept = tunnels.prune_state([live, dead])
+    assert kept == [live]
+
+
+def test_save_and_load_state_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    entry = {"key": "dev/db", "pid": __import__("os").getpid(), "local_port": 15432}
+    tunnels.save_state([entry])
+    assert tunnels.load_state() == [entry]
+
+
+def test_load_state_returns_empty_when_the_file_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "nothing.json")
+    assert tunnels.load_state() == []
+
+
+def test_load_state_returns_empty_when_the_file_is_corrupt(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    path.write_text("{ not json")
+    monkeypatch.setattr(tunnels, "STATE_FILE", path)
+    assert tunnels.load_state() == []
