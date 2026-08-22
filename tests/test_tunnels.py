@@ -339,3 +339,132 @@ def test_session_id_from_log_returns_none_when_absent(tmp_path):
 
 def test_session_id_from_log_returns_none_when_the_file_is_missing(tmp_path):
     assert tunnels.session_id_from_log(tmp_path / "gone.log") is None
+
+
+# --- sticky ports -----------------------------------------------------------
+
+def test_remembered_port_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(tunnels, "PORTS_FILE", tmp_path / "ports.json")
+    assert tunnels.remembered_port("dev/main") is None
+    tunnels.remember_port("dev/main", 52344)
+    assert tunnels.remembered_port("dev/main") == 52344
+
+
+def test_remembered_port_survives_a_corrupt_file(tmp_path, monkeypatch):
+    path = tmp_path / "ports.json"
+    path.write_text("{ not json")
+    monkeypatch.setattr(tunnels, "PORTS_FILE", path)
+    assert tunnels.remembered_port("dev/main") is None
+
+
+def test_pick_port_prefers_the_remembered_port_over_a_random_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(tunnels, "PORTS_FILE", tmp_path / "ports.json")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    tunnels.remember_port("dev/main", free)
+    assert tunnels.pick_port(None, key="dev/main") == free
+
+
+def test_pick_port_ignores_a_remembered_port_that_is_busy(tmp_path, monkeypatch):
+    monkeypatch.setattr(tunnels, "PORTS_FILE", tmp_path / "ports.json")
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        taken = busy.getsockname()[1]
+        tunnels.remember_port("dev/main", taken)
+        assert tunnels.pick_port(None, key="dev/main") != taken
+
+
+# --- doctor -----------------------------------------------------------------
+
+def test_orphan_pids_finds_plugins_not_in_the_state_file():
+    state = [{"key": "dev/main", "pid": 100}]
+    running = {101: 100, 202: 200}      # plugin pid -> its process group
+    assert tunnels.orphan_pids(state, running) == [202]
+
+
+def test_orphan_pids_empty_when_every_plugin_belongs_to_a_tunnel():
+    state = [{"key": "dev/main", "pid": 100}, {"key": "dev/db", "pid": 200}]
+    running = {101: 100, 202: 200}
+    assert tunnels.orphan_pids(state, running) == []
+
+
+def test_orphan_sessions_keeps_only_ids_we_started_and_no_longer_track():
+    sessions = [
+        {"SessionId": "me-aaa", "Target": "i-1"},
+        {"SessionId": "me-bbb", "Target": "i-2"},
+        {"SessionId": "someone-else-ccc", "Target": "i-3"},
+    ]
+    live = {"me-aaa"}
+    ours = {"me-aaa", "me-bbb"}         # ids seen in ~/.tunnels/logs
+    found = tunnels.orphan_sessions(sessions, live_ids=live, our_ids=ours)
+    assert [s["SessionId"] for s in found] == ["me-bbb"]
+
+
+# --- discover ---------------------------------------------------------------
+
+def test_guess_jump_prefers_a_node_of_that_cluster():
+    instances = [
+        {"InstanceId": "i-1", "Name": "bastion", "cluster": None},
+        {"InstanceId": "i-2", "Name": "node", "cluster": "prod-cluster"},
+    ]
+    assert tunnels.guess_jump(instances, "prod-cluster") == \
+        "tag:aws:eks:cluster-name=prod-cluster"
+
+
+def test_guess_jump_falls_back_to_a_named_instance():
+    instances = [{"InstanceId": "i-1", "Name": "bastion", "cluster": None}]
+    assert tunnels.guess_jump(instances, "prod-cluster") == "tag:Name=bastion"
+
+
+def test_guess_jump_falls_back_to_an_instance_id_when_untagged():
+    instances = [{"InstanceId": "i-1", "Name": None, "cluster": None}]
+    assert tunnels.guess_jump(instances, "prod-cluster") == "i-1"
+
+
+def test_guess_jump_returns_none_with_no_instances():
+    assert tunnels.guess_jump([], "prod-cluster") is None
+
+
+def test_render_block_produces_valid_yaml():
+    import yaml as _yaml
+    text = tunnels.render_block(
+        "dev", profile="p", region="eu-west-1",
+        targets=[
+            {"name": "main", "eks": "c1", "jump": "tag:Name=b"},
+            {"name": "apps", "eks": "c2", "jump": "tag:Name=b"},
+        ],
+    )
+    parsed = _yaml.safe_load(text)
+    assert list(parsed) == ["dev"]
+    block = parsed["dev"]
+    assert block["profile"] == "p"
+    assert block["hud"] is True
+    assert list(block["targets"]) == ["main", "apps"]
+    assert block["jump"] == "tag:Name=b"          # shared jump lifted to the block
+
+
+def test_render_block_keeps_a_differing_jump_on_the_target():
+    import yaml as _yaml
+    text = tunnels.render_block(
+        "dev", profile="p", region="r",
+        targets=[
+            {"name": "main", "eks": "c1", "jump": "tag:Name=a"},
+            {"name": "apps", "eks": "c2", "jump": "tag:Name=b"},
+        ],
+    )
+    block = _yaml.safe_load(text)["dev"]
+    assert "jump" not in block
+    assert block["targets"]["main"]["jump"] == "tag:Name=a"
+    assert block["targets"]["apps"]["jump"] == "tag:Name=b"
+
+
+def test_render_block_output_validates_as_a_config():
+    import yaml as _yaml
+    text = tunnels.render_block(
+        "dev", profile="p", region="r",
+        targets=[{"name": "main", "eks": "c1", "jump": "i-0abc"}],
+    )
+    config = _yaml.safe_load(text)
+    assert tunnels.config_block(config, "dev")["profile"] == "p"

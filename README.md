@@ -100,9 +100,68 @@ kubectl --context tunnels-my-env-<target> get nodes
 | `tunnels down all` | Stop everything |
 | `tunnels hud` | Turn the floating label on or off |
 | `tunnels init` | Create and open the config file |
+| `tunnels discover <profile>` | Build a config block by asking the account what it has |
+| `tunnels doctor` | Find leftover tunnels and AWS sessions. `--fix` cleans them up |
 
 `up` skips targets that are already running, so it is safe to repeat after you
 add a new one.
+
+## Filling the config automatically
+
+`tunnels discover` reads an account and offers one cluster at a time:
+
+```console
+$ tunnels discover my-profile --region eu-west-1
+account 111122223333 · profile my-profile · region eu-west-1
+
+3 cluster(s), 45 SSM-registered instance(s)
+
+cluster platform-cluster
+    jump: tag:aws:eks:cluster-name=platform-cluster
+    add it? [Y/n] y
+    added as target 'platform'
+
+cluster argocd-cluster
+    jump: tag:aws:eks:cluster-name=argocd-cluster
+    add it? [Y/n] n
+    skipped
+
+This block will be added:
+    ...
+Append it to /Users/you/.config/tunnels/config.yaml? [y/N] y
+```
+
+It picks the jump host for you: a node of that cluster if there is one,
+otherwise any SSM-registered instance with a `Name` tag. Change it afterwards
+if the guess is wrong.
+
+`--region` matters. Without it the profile's own region is used, which is often
+not where the clusters are. `--name` sets the block name, and defaults to the
+profile name.
+
+Nothing is written until the last question, and that one defaults to no.
+An existing block with the same name is never overwritten.
+
+## Keeping things tidy
+
+`tunnels doctor` looks for two kinds of leftovers: port forward processes with
+no tunnel behind them, and AWS sessions still `Connected` after their tunnel
+went away. Both happen when a laptop sleeps or a process is killed by hand.
+
+```console
+$ tunnels doctor
+no stray port forward processes
+my-profile: 2 aws session(s) still open with no tunnel:
+    someone@example.com-abc123  target i-0a1b2c3d4e5f6a7b8
+    someone@example.com-def456  target i-09f8e7d6c5b4a3210
+
+Run 'tunnels doctor --fix' to clean these up.
+```
+
+It only ever closes sessions this tool started, matched against its own logs.
+Your interactive `aws ssm start-session` shells are left alone. Accounts you
+are not logged into, or that deny `ssm:DescribeSessions`, are skipped with a
+note rather than failing the run.
 
 ## Config
 
@@ -138,7 +197,7 @@ dev:                                    # tunnels up dev
 | `targets` | block | yes | One entry per cluster or host |
 | `eks` | target | one of the two | EKS cluster name. The endpoint is looked up |
 | `host` + `port` | target | one of the two | Any host the jump can reach |
-| `local_port` | target | no | Fixed local port. Omit it and a free one is picked |
+| `local_port` | target | no | Fixed local port. Omit it and a free one is picked, reusing last time's |
 
 A target has either `eks`, or `host` and `port`. Never both, never neither.
 A target with no jump host anywhere is rejected before any AWS call.
@@ -147,6 +206,10 @@ A target with no jump host anywhere is rejected before any AWS call.
 
 Leave `local_port` out unless you need it. A free port is picked at startup and
 the kubeconfig is rewritten to match, so `kubectl` always works.
+
+The port a tunnel used last time is remembered in `~/.tunnels/ports.json` and
+reused whenever it is still free, so your kubeconfig entries stay stable across
+restarts without pinning anything.
 
 Pin a port only for tools that do not read your kubeconfig: `psql`, a
 `DATABASE_URL`, a saved Postman collection. If a pinned port is busy, the tool
@@ -236,10 +299,8 @@ involved at all, because `tls-server-name` does that job.
 - No auto-reconnect. A dropped session shows grey until you run `up` again.
 - `down` leaves the kubectl context in place. It fails loudly if you use it,
   and `up` repairs it.
-- Sessions started before this version, or killed outside the tool, stay
-  `Connected` on the AWS side until they time out. List them with
-  `aws ssm describe-sessions --state Active` and close one with
-  `aws ssm terminate-session --session-id <id>`.
+- Sessions killed outside the tool stay `Connected` on the AWS side until they
+  time out. `tunnels doctor --fix` closes them.
 - The label sits in the top right corner and cannot be moved.
 - macOS only. The label uses Cocoa, because the system Tk on macOS 26 no longer
   draws windows at all.

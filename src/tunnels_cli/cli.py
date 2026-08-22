@@ -16,6 +16,7 @@ import yaml
 STATE_DIR = Path.home() / ".tunnels"
 STATE_FILE = STATE_DIR / "state.json"
 LOG_DIR = STATE_DIR / "logs"
+PORTS_FILE = STATE_DIR / "ports.json"
 CONFIG_PATHS = [
     Path.home() / ".config" / "tunnels" / "config.yaml",
     Path.cwd() / "config.yaml",
@@ -115,10 +116,40 @@ def port_holder(port):
     return f"{name} (pid {pid})" if name else None
 
 
-def pick_port(preferred):
-    """Use the wanted port if it is free, else let the OS choose one."""
+def remembered_port(key):
+    """The port this tunnel used last time, if any."""
+    try:
+        with PORTS_FILE.open() as handle:
+            ports = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    value = ports.get(key) if isinstance(ports, dict) else None
+    return value if isinstance(value, int) else None
+
+
+def remember_port(key, port):
+    """Reuse the same port next time, so kubeconfig entries stay stable."""
+    try:
+        with PORTS_FILE.open() as handle:
+            ports = json.load(handle)
+        if not isinstance(ports, dict):
+            ports = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        ports = {}
+    ports[key] = port
+    PORTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with PORTS_FILE.open("w") as handle:
+        json.dump(ports, handle, indent=2)
+
+
+def pick_port(preferred, key=None):
+    """A pinned port wins, then the one used last time, then any free port."""
     if preferred and port_is_free(preferred):
         return preferred
+    if not preferred and key:
+        last = remembered_port(key)
+        if last and port_is_free(last):
+            return last
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
@@ -399,7 +430,7 @@ def cmd_up(config_name, target_names):
         else:
             host, port = target["host"], int(target["port"])
 
-        local_port = pick_port(target.get("local_port"))
+        local_port = pick_port(target.get("local_port"), key=key)
         wanted = target.get("local_port")
         if wanted and local_port != wanted:
             holder = port_holder(wanted)
@@ -441,6 +472,7 @@ def cmd_up(config_name, target_names):
 
         entries.append(entry)
         save_state(entries)
+        remember_port(key, local_port)
 
     if block.get("hud"):
         start_hud()
@@ -551,6 +583,276 @@ def open_in_editor(path):
     return True
 
 
+# ---------------------------------------------------------------------------
+# discover: build a config block by asking the account what it has
+# ---------------------------------------------------------------------------
+
+def profile_region(profile):
+    """The region configured for a profile, so --region can stay optional."""
+    result = subprocess.run(
+        ["aws", "configure", "get", "region", "--profile", profile],
+        capture_output=True, text=True,
+    )
+    region = result.stdout.strip()
+    if not region:
+        raise TunnelError(
+            f"profile '{profile}' has no region. Pass --region."
+        )
+    return region
+
+
+def ssm_instances(profile, region):
+    """Instances with a live SSM agent, with their Name and cluster tags."""
+    registered = aws(profile, region, "ssm", "describe-instance-information",
+                     "--query", "InstanceInformationList[].InstanceId") or []
+    if not registered:
+        return []
+    described = aws(
+        profile, region, "ec2", "describe-instances",
+        "--instance-ids", *registered,
+        "--filters", "Name=instance-state-name,Values=running",
+        "--query", "Reservations[].Instances[].[InstanceId,Tags]",
+    ) or []
+    instances = []
+    for instance_id, tags in described:
+        tags = {t["Key"]: t["Value"] for t in (tags or [])}
+        instances.append({
+            "InstanceId": instance_id,
+            "Name": tags.get("Name"),
+            "cluster": tags.get("aws:eks:cluster-name"),
+        })
+    return instances
+
+
+def guess_jump(instances, cluster):
+    """The most likely jump host for a cluster, as a config value."""
+    for instance in instances:
+        if instance.get("cluster") == cluster:
+            return f"tag:aws:eks:cluster-name={cluster}"
+    for instance in instances:
+        if instance.get("Name"):
+            return f"tag:Name={instance['Name']}"
+    if instances:
+        return instances[0]["InstanceId"]
+    return None
+
+
+def render_block(name, profile, region, targets):
+    """Turn chosen targets into config YAML text.
+
+    A jump shared by every target is lifted to the block, which is how a
+    person would write it by hand.
+    """
+    jumps = {t["jump"] for t in targets}
+    shared = jumps.pop() if len(jumps) == 1 else None
+
+    block = {"profile": profile, "region": region}
+    if shared:
+        block["jump"] = shared
+    block["hud"] = True
+    block["targets"] = {}
+    for target in targets:
+        entry = {"eks": target["eks"]}
+        if not shared:
+            entry["jump"] = target["jump"]
+        block["targets"][target["name"]] = entry
+    return yaml.safe_dump({name: block}, default_flow_style=False, sort_keys=False)
+
+
+def ask(question, default="y"):
+    """A yes/no prompt that also works when answers are piped in.
+
+    With no input at all, the default applies. The prompt that writes to the
+    config defaults to no, so an unattended run never edits the file.
+    """
+    choices = "Y/n" if default == "y" else "y/N"
+    try:
+        answer = input(f"{question} [{choices}] ").strip().lower()
+    except EOFError:
+        return default == "y"
+    if not answer:
+        return default == "y"
+    return answer.startswith("y")
+
+
+def cmd_discover(profile, region, block_name):
+    account = ensure_sso(profile, region)
+    print(f"account {account} · profile {profile} · region {region}\n")
+
+    clusters = aws(profile, region, "eks", "list-clusters",
+                   "--query", "clusters") or []
+    if not clusters:
+        raise TunnelError(f"no EKS clusters in {region} for profile '{profile}'")
+
+    instances = ssm_instances(profile, region)
+    print(f"{len(clusters)} cluster(s), {len(instances)} SSM-registered instance(s)\n")
+    if not instances:
+        raise TunnelError(
+            "no instances have a live SSM agent here, so there is nothing to "
+            "tunnel through."
+        )
+
+    chosen = []
+    for cluster in clusters:
+        jump = guess_jump(instances, cluster)
+        print(f"cluster {cluster}")
+        print(f"    jump: {jump}")
+        if ask("    add it?"):
+            target = cluster.replace("_", "-").lower()
+            for suffix in ("-cluster", "-eks", "eks-"):
+                target = target.replace(suffix, "")
+            target = target.strip("-") or cluster.lower()
+            chosen.append({"name": target, "eks": cluster, "jump": jump})
+            print(f"    added as target '{target}'\n")
+        else:
+            print("    skipped\n")
+
+    if not chosen:
+        print("nothing chosen, config left alone")
+        return 0
+
+    text = render_block(block_name, profile, region, chosen)
+    print("This block will be added:\n")
+    print("\n".join("    " + line for line in text.splitlines()))
+
+    target_file = CONFIG_PATHS[0]
+    existing = {}
+    if target_file.exists():
+        with target_file.open() as handle:
+            existing = yaml.safe_load(handle) or {}
+    if block_name in existing:
+        print(f"\n'{block_name}' already exists in {target_file}.")
+        print("Pick another name with --name, or edit the file by hand.")
+        return 1
+
+    if not ask(f"\nAppend it to {target_file}?", default="n"):
+        print("config left alone")
+        return 0
+
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    with target_file.open("a") as handle:
+        handle.write("\n" + text)
+    print(f"added to {target_file}\nRun: tunnels up {block_name}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# doctor: find tunnels and AWS sessions that nothing is tracking any more
+# ---------------------------------------------------------------------------
+
+def running_plugins():
+    """Every session-manager-plugin on this machine: pid -> process group."""
+    listed = subprocess.run(
+        ["pgrep", "-fl", "session-manager-plugin"],
+        capture_output=True, text=True,
+    ).stdout.splitlines()
+    found = {}
+    for line in listed:
+        pid = int(line.split()[0])
+        try:
+            found[pid] = os.getpgid(pid)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return found
+
+
+def orphan_pids(state, running):
+    """Plugin processes whose process group is not a tunnel we know about."""
+    known = {entry["pid"] for entry in state}
+    return sorted(pid for pid, pgid in running.items() if pgid not in known)
+
+
+def our_session_ids():
+    """Session ids this tool has ever started, read back from its own logs."""
+    ids = set()
+    if not LOG_DIR.is_dir():
+        return ids
+    for log in LOG_DIR.glob("*.log"):
+        found = session_id_from_log(log)
+        if found:
+            ids.add(found)
+    return ids
+
+
+def orphan_sessions(sessions, live_ids, our_ids):
+    """AWS sessions this tool started that no live tunnel accounts for.
+
+    Sessions started by anything else are left alone: closing someone's
+    interactive shell because it looks unfamiliar would be worse than the
+    leak this cleans up.
+    """
+    return [
+        s for s in sessions
+        if s["SessionId"] in our_ids and s["SessionId"] not in live_ids
+    ]
+
+
+def cmd_doctor(fix):
+    entries = live_state()
+    problems = 0
+
+    plugins = running_plugins()
+    strays = orphan_pids(entries, plugins)
+    if strays:
+        problems += len(strays)
+        print(f"{len(strays)} port forward process(es) with no tunnel behind them:")
+        for pid in strays:
+            print(f"    pid {pid}")
+        if fix:
+            for pid in strays:
+                terminate(pid)
+            print("    stopped")
+    else:
+        print("no stray port forward processes")
+
+    ours = our_session_ids()
+    live_ids = {e.get("session_id") for e in entries if e.get("session_id")}
+    accounts = {}
+    for entry in entries:
+        accounts[(entry["profile"], entry["region"])] = True
+    try:
+        config = load_config()
+    except TunnelError:
+        config = {}
+    for block in config.values():
+        if isinstance(block, dict) and "profile" in block and "region" in block:
+            accounts[(block["profile"], block["region"])] = True
+
+    for profile, region in sorted(accounts):
+        probe = subprocess.run(
+            ["aws", "--profile", profile, "sts", "get-caller-identity"],
+            capture_output=True, text=True,
+        )
+        if probe.returncode != 0:
+            print(f"{profile}: not logged in, skipped")
+            continue
+        try:
+            listed = aws(profile, region, "ssm", "describe-sessions",
+                         "--state", "Active", "--query", "Sessions") or []
+        except TunnelError as exc:
+            reason = "no permission" if "AccessDenied" in str(exc) else "call failed"
+            print(f"{profile}: cannot list sessions ({reason}), skipped")
+            continue
+        stale = orphan_sessions(listed, live_ids, ours)
+        if not stale:
+            print(f"{profile}: no stale aws sessions")
+            continue
+        problems += len(stale)
+        print(f"{profile}: {len(stale)} aws session(s) still open with no tunnel:")
+        for session in stale:
+            print(f"    {session['SessionId']}  target {session.get('Target')}")
+        if fix:
+            for session in stale:
+                terminate_session(profile, region, session["SessionId"])
+            print("    terminated")
+
+    if problems and not fix:
+        print("\nRun 'tunnels doctor --fix' to clean these up.")
+    elif not problems:
+        print("\nnothing to clean up")
+    return 0
+
+
 def cmd_init():
     """Create the config if it is missing, then open it for editing."""
     target = CONFIG_PATHS[0]
@@ -590,6 +892,14 @@ def main(argv=None):
 
     sub.add_parser("status", help="list live tunnels")
     sub.add_parser("init", help="write a starter config file")
+
+    doctor = sub.add_parser("doctor", help="find leftover tunnels and sessions")
+    doctor.add_argument("--fix", action="store_true", help="clean up what it finds")
+
+    disc = sub.add_parser("discover", help="build a config block from an account")
+    disc.add_argument("profile", help="an SSO profile from ~/.aws/config")
+    disc.add_argument("--region", help="defaults to the profile's region")
+    disc.add_argument("--name", help="config block name, defaults to the profile")
     sub.add_parser("hud", help="toggle the floating label")
 
     args = parser.parse_args(argv)
@@ -602,6 +912,11 @@ def main(argv=None):
             return cmd_hud()
         if args.command == "init":
             return cmd_init()
+        if args.command == "doctor":
+            return cmd_doctor(args.fix)
+        if args.command == "discover":
+            region = args.region or profile_region(args.profile)
+            return cmd_discover(args.profile, region, args.name or args.profile)
         return cmd_status()
     except TunnelError as exc:
         print(f"error: {exc}", file=sys.stderr)
