@@ -1,4 +1,18 @@
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
 .DS_Store
+
+# Real configs hold account ids, profile names and internal hostnames.
+# Only config.example.yaml is tracked.
 config.yaml
+config.*.yaml
+!config.example.yaml
+*.local.yaml
+tunnels.yaml
+
+# Runtime state, in case anyone points TUNNELS state at the repo.
+state.json
+*.log
