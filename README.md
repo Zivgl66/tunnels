@@ -133,6 +133,9 @@ installed under, so pyobjc always comes from the right environment.
 
 ## Known limits
 
+- `local_port` is optional. Without it a free port is picked at startup and the
+  kubeconfig is rewritten to match, so `kubectl` always works. Pin a port only
+  when something that does not read the kubeconfig needs a fixed one.
 - No auto-reconnect. If a session drops, `status` shows it grey. Run `up` again.
 - `down` leaves the kubectl context in place. It fails loudly if used, and `up`
   repairs it.
