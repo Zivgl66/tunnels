@@ -13,6 +13,10 @@ config.*.yaml
 *.local.yaml
 tunnels.yaml
 
+# Tooling
+.serena/
+.claude/
+
 # Runtime state, in case anyone points TUNNELS state at the repo.
 state.json
 *.log
