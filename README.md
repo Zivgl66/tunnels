@@ -316,6 +316,6 @@ pip install -e ".[dev]" && pytest -q
 The tests cover the pure parts: config validation, port choice, state pruning,
 the kubeconfig patch, and process group cleanup. They make no AWS calls.
 
-## Architecture
+## License
 
-`docs/architecture.excalidraw`, viewable in any Excalidraw app.
+MIT. See `LICENSE`.

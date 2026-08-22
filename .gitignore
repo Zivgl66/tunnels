@@ -13,9 +13,10 @@ config.*.yaml
 *.local.yaml
 tunnels.yaml
 
-# Tooling
+# Tooling and local notes, not shipped to the repo
 .serena/
 .claude/
+docs/
 
 # Runtime state, in case anyone points TUNNELS state at the repo.
 state.json
