@@ -131,6 +131,40 @@ def live_state():
     return entries
 
 
+def endpoint_host(endpoint):
+    """'https://ABC.eks.amazonaws.com' -> 'ABC.eks.amazonaws.com'"""
+    return endpoint.split("://", 1)[-1].split("/", 1)[0]
+
+
+def patch_kubeconfig(kubeconfig, context_name, local_port, endpoint_host):
+    """Point one context's cluster at the local port, keeping TLS valid.
+
+    `tls-server-name` makes kubectl send the real EKS hostname in the TLS
+    handshake while it connects to 127.0.0.1. Without it the certificate
+    check fails, and the usual workaround is an /etc/hosts entry.
+    """
+    contexts = {c["name"]: c for c in kubeconfig.get("contexts", [])}
+    if context_name not in contexts:
+        raise TunnelError(f"kubeconfig has no context '{context_name}'")
+    cluster_name = contexts[context_name]["context"]["cluster"]
+    for entry in kubeconfig.get("clusters", []):
+        if entry["name"] == cluster_name:
+            entry["cluster"]["server"] = f"https://127.0.0.1:{local_port}"
+            entry["cluster"]["tls-server-name"] = endpoint_host
+            return kubeconfig
+    raise TunnelError(f"kubeconfig has no cluster '{cluster_name}'")
+
+
+def write_kubeconfig_patch(context_name, local_port, host):
+    """Read ~/.kube/config, patch it, write it back."""
+    path = Path(os.environ.get("KUBECONFIG", Path.home() / ".kube" / "config"))
+    with path.open() as handle:
+        kubeconfig = yaml.safe_load(handle)
+    patched = patch_kubeconfig(kubeconfig, context_name, local_port, host)
+    with path.open("w") as handle:
+        yaml.safe_dump(patched, handle, default_flow_style=False)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")

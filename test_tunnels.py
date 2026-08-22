@@ -120,3 +120,82 @@ def test_load_state_returns_empty_when_the_file_is_corrupt(tmp_path, monkeypatch
     path.write_text("{ not json")
     monkeypatch.setattr(tunnels, "STATE_FILE", path)
     assert tunnels.load_state() == []
+
+
+def _kubeconfig():
+    return {
+        "clusters": [
+            {"name": "other", "cluster": {"server": "https://other:443"}},
+            {
+                "name": "arn:aws:eks:il-central-1:1:cluster/c1",
+                "cluster": {
+                    "server": "https://ABC.gr7.il-central-1.eks.amazonaws.com",
+                    "certificate-authority-data": "xyz",
+                },
+            },
+        ],
+        "contexts": [
+            {
+                "name": "tunnels-dev-eks-main",
+                "context": {
+                    "cluster": "arn:aws:eks:il-central-1:1:cluster/c1",
+                    "user": "u",
+                },
+            }
+        ],
+    }
+
+
+def test_patch_kubeconfig_rewrites_server_and_sets_tls_server_name():
+    patched = tunnels.patch_kubeconfig(
+        _kubeconfig(),
+        context_name="tunnels-dev-eks-main",
+        local_port=9443,
+        endpoint_host="ABC.gr7.il-central-1.eks.amazonaws.com",
+    )
+    cluster = next(
+        c for c in patched["clusters"]
+        if c["name"] == "arn:aws:eks:il-central-1:1:cluster/c1"
+    )["cluster"]
+    assert cluster["server"] == "https://127.0.0.1:9443"
+    assert cluster["tls-server-name"] == "ABC.gr7.il-central-1.eks.amazonaws.com"
+
+
+def test_patch_kubeconfig_leaves_other_clusters_alone():
+    patched = tunnels.patch_kubeconfig(
+        _kubeconfig(),
+        context_name="tunnels-dev-eks-main",
+        local_port=9443,
+        endpoint_host="ABC.gr7.il-central-1.eks.amazonaws.com",
+    )
+    other = next(c for c in patched["clusters"] if c["name"] == "other")["cluster"]
+    assert other["server"] == "https://other:443"
+    assert "tls-server-name" not in other
+
+
+def test_patch_kubeconfig_keeps_the_certificate_authority():
+    patched = tunnels.patch_kubeconfig(
+        _kubeconfig(),
+        context_name="tunnels-dev-eks-main",
+        local_port=9443,
+        endpoint_host="ABC.gr7.il-central-1.eks.amazonaws.com",
+    )
+    cluster = next(
+        c for c in patched["clusters"]
+        if c["name"] == "arn:aws:eks:il-central-1:1:cluster/c1"
+    )["cluster"]
+    assert cluster["certificate-authority-data"] == "xyz"
+
+
+def test_patch_kubeconfig_unknown_context_raises():
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.patch_kubeconfig(
+            _kubeconfig(),
+            context_name="missing",
+            local_port=9443,
+            endpoint_host="h",
+        )
+
+
+def test_endpoint_host_strips_the_scheme():
+    assert tunnels.endpoint_host("https://ABC.eks.amazonaws.com") == "ABC.eks.amazonaws.com"
