@@ -25,6 +25,55 @@ class TunnelError(Exception):
     """Any failure the user needs to read and act on."""
 
 
+def load_config(path=None):
+    """Read the YAML config. Prefer ~/.config/tunnels/config.yaml."""
+    candidates = [Path(path)] if path else CONFIG_PATHS
+    for candidate in candidates:
+        if candidate.is_file():
+            with candidate.open() as handle:
+                return yaml.safe_load(handle) or {}
+    looked = ", ".join(str(c) for c in candidates)
+    raise TunnelError(f"no config file found. Looked in: {looked}")
+
+
+def config_block(config, name):
+    """Return one named block, with a helpful error if it is missing."""
+    if name not in config:
+        known = ", ".join(sorted(config)) or "(none)"
+        raise TunnelError(f"unknown config '{name}'. Known configs: {known}")
+    block = config[name]
+    for key in ("profile", "region", "jump", "targets"):
+        if key not in block:
+            raise TunnelError(f"config '{name}' is missing '{key}'")
+    for target_name, target in block["targets"].items():
+        validate_target(target_name, target)
+    return block
+
+
+def validate_target(name, target):
+    """A target is either an EKS cluster or a host and port. Never both."""
+    has_eks = "eks" in target
+    has_host = "host" in target
+    if has_eks and has_host:
+        raise TunnelError(f"target '{name}' has both 'eks' and 'host'. Pick one.")
+    if not has_eks and not has_host:
+        raise TunnelError(f"target '{name}' needs either 'eks' or 'host' and 'port'.")
+    if has_host and "port" not in target:
+        raise TunnelError(f"target '{name}' has 'host' but no 'port'.")
+
+
+def select_targets(block, names):
+    """No names means every target in the block."""
+    targets = block["targets"]
+    if not names:
+        return dict(targets)
+    missing = [n for n in names if n not in targets]
+    if missing:
+        known = ", ".join(sorted(targets))
+        raise TunnelError(f"unknown target(s): {', '.join(missing)}. Known: {known}")
+    return {n: targets[n] for n in names}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
