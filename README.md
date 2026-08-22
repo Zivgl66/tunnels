@@ -20,12 +20,20 @@ cluster you are pointed at.
 ## Install
 
 ```bash
-ln -s "$PWD/tunnels" /usr/local/bin/tunnels
-mkdir -p ~/.config/tunnels
-cp config.example.yaml ~/.config/tunnels/config.yaml
+./install.sh
 ```
 
-Then edit `~/.config/tunnels/config.yaml`.
+It checks for `aws`, `session-manager-plugin`, `kubectl` and `pyyaml`, installs
+pyobjc for the floating label if it is missing, symlinks `tunnels` into the
+first writable directory on your PATH, and seeds `~/.config/tunnels/config.yaml`
+if you do not have one.
+
+It is a symlink, not a copy, so `git pull` updates the command.
+
+Then edit `~/.config/tunnels/config.yaml` and run `tunnels status` from
+anywhere.
+
+To remove it: `rm ~/.local/bin/tunnels` (or wherever the script linked it).
 
 ## Use
 
