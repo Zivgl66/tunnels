@@ -1,26 +1,82 @@
-# Copy to ~/.config/tunnels/config.yaml and edit.
-# Each top level key is a config name: `tunnels up dev`.
+# tunnels config
+#
+# Each top level key is an environment name you pass to `tunnels up`.
+# Replace every CHANGEME, then run:  tunnels up dev
+#
+# ---------------------------------------------------------------------------
+# Finding the values for an account
+# ---------------------------------------------------------------------------
+#   aws sso login --profile <profile>
+#
+#   # cluster names, exactly as EKS knows them
+#   aws --profile <profile> --region <region> eks list-clusters
+#
+#   # instances the SSM agent has registered (jump host candidates)
+#   aws --profile <profile> --region <region> ssm describe-instance-information \
+#       --query "InstanceInformationList[].[InstanceId,ComputerName]" --output table
+#
+#   # their Name tags
+#   aws --profile <profile> --region <region> ec2 describe-instances \
+#       --filters Name=instance-state-name,Values=running \
+#       --query "Reservations[].Instances[].[InstanceId,Tags[?Key=='Name']|[0].Value]" \
+#       --output table
+#
+# Pick an instance that appears in both lists, and use its Name tag.
+#
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+#   profile     an SSO profile from ~/.aws/config
+#   region      the region the cluster lives in, not your default
+#   jump        the jump host: an instance id (i-0abc...) or a tag lookup
+#               (tag:Key=Value). Set it on the block, on a target, or both.
+#               A target's own jump wins. Every target needs one somehow.
+#   hud         true starts the floating label along with the tunnels
+#   targets     one entry per cluster or host
+#
+# Each target is either an EKS cluster:
+#     eks: my-cluster-name
+# or any host the jump can reach:
+#     host: db.abc.eu-west-1.rds.amazonaws.com
+#     port: 5432
+# Never both, never neither.
+#
+#   local_port  optional. Leave it out and a free port is picked at startup,
+#               with the kubeconfig rewritten to match, so kubectl always
+#               works. Pin one only for tools that ignore the kubeconfig,
+#               such as psql or a DATABASE_URL.
 
 dev:
-  profile: acme-dev
-  region: il-central-1
-  jump: "tag:Name=jump-server"   # or an instance id: i-0abc123def456
+  profile: CHANGEME-sso-profile
+  region: eu-west-1
+  jump: "tag:Name=CHANGEME-jump-server"
   hud: true
   targets:
-    eks-main:
-      eks: my-dev-cluster        # EKS target. The endpoint is looked up.
-      local_port: 9443
-    db:
-      host: mydb.abc.il-central-1.rds.amazonaws.com
-      port: 5432
-      local_port: 15432
+    main:
+      eks: CHANGEME-dev-cluster
 
-prd:
-  profile: acme-fe-prd
-  region: il-central-1
-  jump: "tag:Name=bastion"
-  hud: true
-  targets:
-    eks-main:
-      eks: my-prod-cluster
-      local_port: 9444
+    # A second cluster in the same account. It gets its own session, its own
+    # port and its own kubectl context, so nothing collides.
+    # apps:
+    #   eks: CHANGEME-apps-cluster
+    #
+    #   # Only needed when this cluster sits behind a different jump host.
+    #   jump: "tag:Name=CHANGEME-other-jump"
+
+    # A database, reached through the same jump host.
+    # orders-db:
+    #   host: CHANGEME.abc.eu-west-1.rds.amazonaws.com
+    #   port: 5432
+    #   local_port: 15432        # pinned: psql needs a fixed port
+
+# A second environment. Different account means a separate block, because
+# `profile` is set per block.
+#
+# prd:
+#   profile: CHANGEME-prd-profile
+#   region: eu-west-1
+#   jump: "tag:Name=CHANGEME-prd-jump"
+#   hud: true
+#   targets:
+#     main:
+#       eks: CHANGEME-prd-cluster
