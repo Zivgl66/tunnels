@@ -240,3 +240,12 @@ def test_matching_entries_by_target_name():
     ]
     picked = tunnels.matching_entries(entries, "dev", ["eks"])
     assert [e["key"] for e in picked] == ["dev/eks"]
+
+
+def test_pid_alive_true_for_a_process_we_do_not_own():
+    # pid 1 is launchd, owned by root. os.kill raises EPERM, not ESRCH.
+    assert tunnels.pid_alive(1) is True
+
+
+def test_pid_alive_false_for_a_pid_that_does_not_exist():
+    assert tunnels.pid_alive(999999) is False

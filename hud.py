@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Floating label showing the live tunnels. Draws over fullscreen apps.
+
+Run with /usr/bin/python3: it is the interpreter that has pyobjc here.
+System Tk is broken on macOS 26, so this uses a native borderless NSWindow
+instead. The window joins every Space and is marked fullScreenAuxiliary, so
+it stays visible while another app is fullscreen. It ignores mouse events,
+so clicks pass through to whatever is underneath.
+
+Reads ~/.tunnels/state.json every 2 seconds and quits when it is empty.
+"""
+
+import json
+import os
+from pathlib import Path
+
+import objc
+from Cocoa import (
+    NSApplication,
+    NSApplicationActivationPolicyAccessory,
+    NSBackingStoreBuffered,
+    NSColor,
+    NSFont,
+    NSMakeRect,
+    NSObject,
+    NSScreen,
+    NSTextField,
+    NSTimer,
+    NSView,
+    NSWindow,
+    NSWindowCollectionBehaviorCanJoinAllSpaces,
+    NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSWindowCollectionBehaviorStationary,
+    NSWindowStyleMaskBorderless,
+)
+
+STATE_FILE = Path.home() / ".tunnels" / "state.json"
+POLL_SECONDS = 2.0
+
+FONT_SIZE = 11.0
+LINE = 14
+PAD = 6
+MARGIN = 16          # gap from the screen edges
+CHAR_WIDTH = FONT_SIZE * 0.62   # monospaced advance, used to size the window
+# ponytail: the width is estimated from the character count instead of being
+# measured. It is a monospaced font, so the estimate is close enough.
+
+DEAD = (0.55, 0.57, 0.60)       # a dropped session: grey, not shouting
+
+# One colour per config name, so `dev` and `prd` never look alike.
+PALETTE = [
+    (0.22, 0.72, 0.36),   # green
+    (0.30, 0.60, 0.95),   # blue
+    (0.95, 0.55, 0.20),   # orange
+    (0.72, 0.45, 0.95),   # purple
+    (0.25, 0.80, 0.78),   # teal
+    (0.95, 0.40, 0.55),   # pink
+]
+
+
+def color_for(config_name):
+    """Same config always gets the same colour, across restarts."""
+    return PALETTE[sum(config_name.encode()) % len(PALETTE)]
+
+
+def pid_alive(pid):
+    """EPERM means the process exists but is not ours. That still counts."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, TypeError):
+        return False
+    return True
+
+
+def read_entries():
+    try:
+        with STATE_FILE.open() as handle:
+            entries = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def lines_for(entries):
+    """One short line per tunnel: dot, config/target, port, account tail."""
+    rows = []
+    for entry in sorted(entries, key=lambda e: e["key"]):
+        live = pid_alive(entry.get("pid"))
+        account = str(entry.get("account", "?"))[-4:]
+        text = (
+            f"{'●' if live else '○'} {entry['config']}/{entry['target']} "
+            f":{entry['local_port']} ·{account}"
+        )
+        rows.append((text, color_for(entry["config"]) if live else DEAD))
+    return rows
+
+
+def make_field(text, rgb, y, width):
+    field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, width, LINE))
+    field.setStringValue_(text)
+    field.setBezeled_(False)
+    field.setDrawsBackground_(False)
+    field.setEditable_(False)
+    field.setSelectable_(False)
+    field.setAlignment_(2)  # NSTextAlignmentRight
+    field.setFont_(NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, 0.3))
+    field.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(*rgb, 1.0))
+    return field
+
+
+class Hud(NSObject):
+    def initWithWindow_(self, window):
+        self = objc.super(Hud, self).init()
+        self.window = window
+        return self
+
+    def tick_(self, _timer):
+        entries = read_entries()
+        if not entries:
+            NSApplication.sharedApplication().terminate_(None)
+            return
+        self.draw(entries)
+
+    @objc.python_method
+    def draw(self, entries):
+        rows = lines_for(entries)
+        height = PAD * 2 + LINE * len(rows)
+        width = int(max(len(text) for text, _ in rows) * CHAR_WIDTH) + PAD * 3
+
+        screen = NSScreen.mainScreen().frame()
+        frame = NSMakeRect(
+            screen.size.width - width - MARGIN,
+            screen.size.height - height - MARGIN - 28,  # clear of the menu bar
+            width, height,
+        )
+        self.window.setFrame_display_(frame, True)
+
+        content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
+        content.setWantsLayer_(True)
+        layer = content.layer()
+        layer.setCornerRadius_(7.0)
+        layer.setBackgroundColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.06, 0.08, 0.10, 0.82).CGColor()
+        )
+
+        y = height - PAD
+        for text, rgb in rows:
+            y -= LINE
+            content.addSubview_(make_field(text, rgb, y, width - PAD))
+
+        self.window.setContentView_(content)
+        self.window.orderFrontRegardless()
+
+
+def main():
+    app = NSApplication.sharedApplication()
+    app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
+    window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, 200, 40), NSWindowStyleMaskBorderless,
+        NSBackingStoreBuffered, False,
+    )
+    window.setOpaque_(False)
+    window.setBackgroundColor_(NSColor.clearColor())
+    window.setHasShadow_(True)
+    window.setIgnoresMouseEvents_(True)
+    window.setLevel_(25)  # NSStatusWindowLevel: above normal and floating windows
+    window.setCollectionBehavior_(
+        NSWindowCollectionBehaviorCanJoinAllSpaces
+        | NSWindowCollectionBehaviorFullScreenAuxiliary
+        | NSWindowCollectionBehaviorStationary
+    )
+
+    hud = Hud.alloc().initWithWindow_(window)
+    entries = read_entries()
+    if not entries:
+        return
+    hud.draw(entries)
+
+    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+        POLL_SECONDS, hud, "tick:", None, True
+    )
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
