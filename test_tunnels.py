@@ -199,3 +199,18 @@ def test_patch_kubeconfig_unknown_context_raises():
 
 def test_endpoint_host_strips_the_scheme():
     assert tunnels.endpoint_host("https://ABC.eks.amazonaws.com") == "ABC.eks.amazonaws.com"
+
+
+def test_wait_for_port_returns_true_once_something_listens():
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        assert tunnels.wait_for_port(port, timeout=2) is True
+
+
+def test_wait_for_port_times_out_on_a_closed_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    assert tunnels.wait_for_port(closed, timeout=1) is False

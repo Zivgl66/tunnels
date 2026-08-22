@@ -237,6 +237,100 @@ def update_kubeconfig(profile, region, cluster, alias):
     )
 
 
+def wait_for_port(port, timeout=20):
+    """Poll a TCP connect until it works or the timeout runs out."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket() as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.3)
+    return False
+
+
+def start_session(profile, region, instance_id, host, port, local_port, log_path):
+    """Start a detached SSM port forward. Returns the process id."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    params = f"host={host},portNumber={port},localPortNumber={local_port}"
+    cmd = [
+        "aws", "--profile", profile, "--region", region,
+        "ssm", "start-session", "--target", instance_id,
+        "--document-name", "AWS-StartPortForwardingSessionToRemoteHost",
+        "--parameters", params,
+    ]
+    log = log_path.open("w")
+    proc = subprocess.Popen(
+        cmd, stdout=log, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+    return proc.pid
+
+
+def cmd_up(config_name, target_names):
+    config = load_config()
+    block = config_block(config, config_name)
+    targets = select_targets(block, target_names)
+    profile, region = block["profile"], block["region"]
+
+    account = ensure_sso(profile, region)
+    instance_id = resolve_jump(profile, region, block["jump"])
+    print(f"account {account} \u00b7 jump {instance_id}")
+
+    entries = live_state()
+    running = {e["key"] for e in entries}
+
+    for name, target in sorted(targets.items()):
+        key = f"{config_name}/{name}"
+        if key in running:
+            print(f"  {name}: already up, skipping")
+            continue
+
+        if "eks" in target:
+            host, port = eks_endpoint(profile, region, target["eks"]), 443
+        else:
+            host, port = target["host"], int(target["port"])
+
+        local_port = pick_port(target.get("local_port"))
+        if local_port != target.get("local_port"):
+            print(f"  {name}: port {target.get('local_port')} busy, using {local_port}")
+
+        log_path = LOG_DIR / f"{config_name}-{name}.log"
+        pid = start_session(profile, region, instance_id, host, port,
+                            local_port, log_path)
+
+        if not wait_for_port(local_port):
+            os.kill(pid, 15)
+            tail = log_path.read_text().strip().splitlines()[-5:]
+            raise TunnelError(
+                f"{name}: port {local_port} never opened.\n  " + "\n  ".join(tail)
+            )
+
+        entry = {
+            "key": key, "config": config_name, "target": name, "pid": pid,
+            "local_port": local_port, "remote_host": host, "remote_port": port,
+            "profile": profile, "region": region, "account": account,
+            "cluster": target.get("eks"), "context": None,
+            "started": time.time(),
+        }
+
+        if "eks" in target:
+            alias = f"tunnels-{config_name}-{name}"
+            update_kubeconfig(profile, region, target["eks"], alias)
+            write_kubeconfig_patch(alias, local_port, host)
+            entry["context"] = alias
+            print(f"  {name}: up on {local_port} \u00b7 context {alias}")
+        else:
+            print(f"  {name}: up on {local_port} -> {host}:{port}")
+
+        entries.append(entry)
+        save_state(entries)
+
+    if block.get("hud"):
+        start_hud()
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
