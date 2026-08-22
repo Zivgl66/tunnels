@@ -32,7 +32,10 @@ def load_config(path=None):
             with candidate.open() as handle:
                 return yaml.safe_load(handle) or {}
     looked = ", ".join(str(c) for c in candidates)
-    raise TunnelError(f"no config file found. Looked in: {looked}")
+    raise TunnelError(
+        f"no config file found. Looked in: {looked}\n"
+        "Run 'tunnels init' to create one."
+    )
 
 
 def config_block(config, name):
@@ -415,16 +418,43 @@ def cmd_hud():
     return 0
 
 
+def open_in_editor(path):
+    """Open the config the way the user would expect on their machine."""
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    try:
+        if editor:
+            subprocess.run([*editor.split(), str(path)], check=False)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", "-t", str(path)], check=False)
+        else:
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def cmd_init():
-    """Copy the example config into place, without clobbering a real one."""
+    """Create the config if it is missing, then open it for editing."""
     target = CONFIG_PATHS[0]
     if target.exists():
-        print(f"config already exists at {target}, left alone")
-        return 0
-    example = Path(__file__).resolve().parent / "config.example.yaml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(example.read_text())
-    print(f"wrote {target}\nEdit it, then run: tunnels up dev")
+        print(f"config already at {target}")
+    else:
+        example = Path(__file__).resolve().parent / "config.example.yaml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(example.read_text())
+        print(f"wrote {target}")
+
+    print("\nFill in these, one block per environment:")
+    print("  profile     an SSO profile from ~/.aws/config")
+    print("  region      the account's region")
+    print("  jump        Name tag of the SSM-registered jump host, or an i-... id")
+    print("  eks         the EKS cluster name (or use host + port for a database)")
+
+    if open_in_editor(target):
+        print(f"\nopened {target}")
+    else:
+        print(f"\nedit it at: {target}")
+    print("Then run: tunnels up <block-name>")
     return 0
 
 

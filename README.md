@@ -18,24 +18,28 @@ macOS, plus:
 
 ## Install
 
-```bash
-pipx install git+https://github.com/zivgl66/tunnels-cli
-tunnels init          # writes ~/.config/tunnels/config.yaml
-```
-
-`pipx` keeps it in its own environment, so nothing lands in your system Python.
-Plain `pip install` works too if you prefer.
-
-From a local checkout:
+One line:
 
 ```bash
-pipx install .
+pipx install git+https://github.com/Zivgl66/tunnels.git && tunnels init
 ```
 
-Behind a TLS-inspecting proxy, add `UV_NATIVE_TLS=1` in front of the command so
-the installer trusts your system certificates.
+`tunnels init` writes `~/.config/tunnels/config.yaml` and opens it in your
+editor. Fill in the profile, region, jump host tag and cluster name, save, and
+you are done.
 
-Then edit `~/.config/tunnels/config.yaml`.
+No `pipx`? `brew install pipx`. Plain `pip install` works too, but pipx keeps
+the tool in its own environment.
+
+Behind a TLS-inspecting proxy, prefix the command with `UV_NATIVE_TLS=1` so the
+installer trusts your system certificates.
+
+### From a checkout
+
+```bash
+git clone https://github.com/Zivgl66/tunnels.git && cd tunnels
+pipx install --editable .    # edits take effect with no reinstall
+```
 
 ## Use
 
