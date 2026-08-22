@@ -96,7 +96,7 @@ kubectl --context tunnels-my-env-<target> get nodes
 | `tunnels up <env>` | Start every target in that config block |
 | `tunnels up <env> <target>...` | Start only the named targets |
 | `tunnels status` | List live tunnels. Same as bare `tunnels` |
-| `tunnels down <env>` | Stop that config's tunnels |
+| `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |
 | `tunnels down all` | Stop everything |
 | `tunnels hud` | Turn the floating label on or off |
 | `tunnels init` | Create and open the config file |
@@ -208,6 +208,16 @@ Stopping a tunnel kills the whole process group. `aws ssm start-session` starts
 `session-manager-plugin` as a child, and the child is what holds the port, so
 killing only the parent would leave the port taken.
 
+`down` also calls `ssm terminate-session` on the AWS side. Killing the local
+process frees the port, but AWS keeps the session in `Connected` until it times
+out, and those sessions count against your account's limits. The session id is
+read from the plugin's own log output when the tunnel starts.
+
+`down` does not touch two things. Your kubectl context is left in place: a
+stale one fails loudly on a dead port, which is clearer than a context that
+quietly disappears, and the next `up` repairs it. `/etc/hosts` is never
+involved at all, because `tls-server-name` does that job.
+
 ## Troubleshooting
 
 | What you see | What it means | What to do |
@@ -226,6 +236,10 @@ killing only the parent would leave the port taken.
 - No auto-reconnect. A dropped session shows grey until you run `up` again.
 - `down` leaves the kubectl context in place. It fails loudly if you use it,
   and `up` repairs it.
+- Sessions started before this version, or killed outside the tool, stay
+  `Connected` on the AWS side until they time out. List them with
+  `aws ssm describe-sessions --state Active` and close one with
+  `aws ssm terminate-session --session-id <id>`.
 - The label sits in the top right corner and cannot be moved.
 - macOS only. The label uses Cocoa, because the system Tk on macOS 26 no longer
   draws windows at all.

@@ -316,3 +316,26 @@ def test_terminate_kills_the_whole_process_group():
 
 def test_terminate_is_fine_with_a_pid_that_is_already_gone():
     assert tunnels.terminate(999999) is True
+
+
+SESSION_LOG = """
+Starting session with SessionId: someone@example.com-abc123def456ghi789
+Port 62590 opened for sessionId someone@example.com-abc123def456ghi789.
+Waiting for connections...
+"""
+
+
+def test_session_id_from_log_finds_the_id(tmp_path):
+    log = tmp_path / "s.log"
+    log.write_text(SESSION_LOG)
+    assert tunnels.session_id_from_log(log) == "someone@example.com-abc123def456ghi789"
+
+
+def test_session_id_from_log_returns_none_when_absent(tmp_path):
+    log = tmp_path / "s.log"
+    log.write_text("nothing useful here\n")
+    assert tunnels.session_id_from_log(log) is None
+
+
+def test_session_id_from_log_returns_none_when_the_file_is_missing(tmp_path):
+    assert tunnels.session_id_from_log(tmp_path / "gone.log") is None

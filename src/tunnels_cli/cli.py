@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -343,6 +344,32 @@ def start_session(profile, region, instance_id, host, port, local_port, log_path
     return proc.pid
 
 
+def session_id_from_log(log_path):
+    """Pull the SSM session id out of the plugin's own output.
+
+    Killing the local process frees the port, but AWS keeps the session in
+    Connected until it times out. The id is needed to close it properly.
+    """
+    try:
+        text = log_path.read_text()
+    except OSError:
+        return None
+    match = re.search(r"Starting session with SessionId:\s*(\S+)", text)
+    return match.group(1) if match else None
+
+
+def terminate_session(profile, region, session_id):
+    """Best effort. A tunnel is already stopped locally by this point."""
+    if not session_id:
+        return False
+    result = subprocess.run(
+        ["aws", "--profile", profile, "--region", region,
+         "ssm", "terminate-session", "--session-id", session_id],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
 def cmd_up(config_name, target_names):
     config = load_config()
     block = config_block(config, config_name)
@@ -397,6 +424,7 @@ def cmd_up(config_name, target_names):
             "profile": profile, "region": region, "account": account,
             "jump": instance_id,
             "cluster": target.get("eks"), "context": None,
+            "session_id": session_id_from_log(log_path),
             "started": time.time(),
         }
 
@@ -436,9 +464,13 @@ def cmd_down(config_name, target_names):
         return 0
     for entry in doomed:
         stopped = terminate(entry["pid"])
+        closed = terminate_session(
+            entry.get("profile"), entry.get("region"), entry.get("session_id")
+        )
         port = entry["local_port"]
+        note = "" if closed else ", aws session left to time out"
         if stopped and port_is_free(port):
-            print(f"stopped {entry['key']} (port {port} released)")
+            print(f"stopped {entry['key']} (port {port} released{note})")
         elif stopped:
             holder = port_holder(port)
             print(f"stopped {entry['key']}, but port {port} is still held"
