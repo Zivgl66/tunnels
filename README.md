@@ -61,6 +61,37 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
+## Several clusters in one account
+
+Add one target per cluster. Each gets its own SSM session, its own local port
+and its own kubectl context, so nothing collides.
+
+```yaml
+mgmt-dev:
+  profile: my-sso-profile
+  region: eu-west-1
+  jump: "tag:Name=shared-bastion"     # the default for every target below
+  hud: true
+  targets:
+    eks-main:
+      eks: platform-cluster
+      local_port: 9443
+    eks-apps:
+      eks: apps-dev-cluster
+      local_port: 9444
+      jump: "tag:Name=apps-bastion"   # this cluster sits behind another host
+    db:
+      host: some.rds.amazonaws.com
+      port: 5432
+      local_port: 15432
+```
+
+`tunnels up mgmt-dev` starts all three. `tunnels up mgmt-dev eks-apps` starts
+one. Each distinct jump host is looked up once per run, not once per target.
+
+Either set `jump` on the block, or on every target, or both. A target with no
+jump anywhere is rejected before any AWS call.
+
 ## How it works
 
 Each target becomes its own `aws ssm start-session` process, forwarding a local

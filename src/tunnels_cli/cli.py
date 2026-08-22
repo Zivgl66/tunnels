@@ -44,12 +44,24 @@ def config_block(config, name):
         known = ", ".join(sorted(config)) or "(none)"
         raise TunnelError(f"unknown config '{name}'. Known configs: {known}")
     block = config[name]
-    for key in ("profile", "region", "jump", "targets"):
+    for key in ("profile", "region", "targets"):
         if key not in block:
             raise TunnelError(f"config '{name}' is missing '{key}'")
     for target_name, target in block["targets"].items():
         validate_target(target_name, target)
+        jump_for(block, target_name, target)   # raises if no jump applies
     return block
+
+
+def jump_for(block, target_name, target):
+    """A target's own jump wins. Otherwise the block's jump applies."""
+    jump = target.get("jump") or block.get("jump")
+    if not jump:
+        raise TunnelError(
+            f"target '{target_name}' has no jump host. Set 'jump' on the "
+            "target, or once on the config block."
+        )
+    return jump
 
 
 def validate_target(name, target):
@@ -281,9 +293,9 @@ def cmd_up(config_name, target_names):
     profile, region = block["profile"], block["region"]
 
     account = ensure_sso(profile, region)
-    instance_id = resolve_jump(profile, region, block["jump"])
-    print(f"account {account} \u00b7 jump {instance_id}")
+    print(f"account {account}")
 
+    jump_cache = {}
     entries = live_state()
     running = {e["key"] for e in entries}
 
@@ -292,6 +304,11 @@ def cmd_up(config_name, target_names):
         if key in running:
             print(f"  {name}: already up, skipping")
             continue
+
+        jump = jump_for(block, name, target)
+        if jump not in jump_cache:
+            jump_cache[jump] = resolve_jump(profile, region, jump)
+        instance_id = jump_cache[jump]
 
         if "eks" in target:
             host, port = eks_endpoint(profile, region, target["eks"]), 443
@@ -317,6 +334,7 @@ def cmd_up(config_name, target_names):
             "key": key, "config": config_name, "target": name, "pid": pid,
             "local_port": local_port, "remote_host": host, "remote_port": port,
             "profile": profile, "region": region, "account": account,
+            "jump": instance_id,
             "cluster": target.get("eks"), "context": None,
             "started": time.time(),
         }
@@ -326,9 +344,11 @@ def cmd_up(config_name, target_names):
             update_kubeconfig(profile, region, target["eks"], alias)
             write_kubeconfig_patch(alias, local_port, host)
             entry["context"] = alias
-            print(f"  {name}: up on {local_port} \u00b7 context {alias}")
+            print(f"  {name}: up on {local_port} via {instance_id} "
+                  f"\u00b7 context {alias}")
         else:
-            print(f"  {name}: up on {local_port} -> {host}:{port}")
+            print(f"  {name}: up on {local_port} via {instance_id} "
+                  f"-> {host}:{port}")
 
         entries.append(entry)
         save_state(entries)

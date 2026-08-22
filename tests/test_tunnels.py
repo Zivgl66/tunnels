@@ -245,3 +245,44 @@ def test_pid_alive_true_for_a_process_we_do_not_own():
 
 def test_pid_alive_false_for_a_pid_that_does_not_exist():
     assert tunnels.pid_alive(999999) is False
+
+
+def test_jump_for_falls_back_to_the_block_jump():
+    block = {"jump": "tag:Name=shared", "targets": {}}
+    assert tunnels.jump_for(block, "eks", {"eks": "c"}) == "tag:Name=shared"
+
+
+def test_jump_for_prefers_the_target_jump():
+    block = {"jump": "tag:Name=shared", "targets": {}}
+    target = {"eks": "c", "jump": "i-0deadbeef"}
+    assert tunnels.jump_for(block, "eks", target) == "i-0deadbeef"
+
+
+def test_jump_for_raises_when_neither_is_set():
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.jump_for({"targets": {}}, "eks", {"eks": "c"})
+
+
+def test_config_block_allows_a_missing_block_jump_when_every_target_has_one():
+    config = {
+        "dev": {
+            "profile": "p", "region": "r",
+            "targets": {
+                "a": {"eks": "c1", "jump": "i-0a"},
+                "b": {"eks": "c2", "jump": "i-0b"},
+            },
+        }
+    }
+    block = tunnels.config_block(config, "dev")
+    assert tunnels.jump_for(block, "a", block["targets"]["a"]) == "i-0a"
+
+
+def test_config_block_rejects_a_target_with_no_jump_anywhere():
+    config = {
+        "dev": {
+            "profile": "p", "region": "r",
+            "targets": {"a": {"eks": "c1", "jump": "i-0a"}, "b": {"eks": "c2"}},
+        }
+    }
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.config_block(config, "dev")
