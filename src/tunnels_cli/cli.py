@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -98,6 +99,21 @@ def port_is_free(port):
     return True
 
 
+def port_holder(port):
+    """Name the process listening on a port, for a clearer error message."""
+    result = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "cp"],
+        capture_output=True, text=True,
+    )
+    pid = name = None
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+        elif line.startswith("c"):
+            name = line[1:]
+    return f"{name} (pid {pid})" if name else None
+
+
 def pick_port(preferred):
     """Use the wanted port if it is free, else let the OS choose one."""
     if preferred and port_is_free(preferred):
@@ -118,6 +134,47 @@ def pid_alive(pid):
     except (OSError, TypeError):
         return False
     return True
+
+
+def group_alive(pgid):
+    """True while the process group still has live members.
+
+    `killpg(pgid, 0)` is not usable here: a dead but unreaped child leaves a
+    zombie in the group, and signalling a zombie answers EPERM, which reads as
+    "still running" when it is not. pgrep only lists live processes.
+    """
+    result = subprocess.run(
+        ["pgrep", "-g", str(pgid)], capture_output=True, text=True
+    )
+    return bool(result.stdout.split())
+
+
+def terminate(pid, timeout=5):
+    """Stop a session and the plugin it spawned.
+
+    `aws ssm start-session` runs `session-manager-plugin` as a child, and the
+    child is what binds the local port. Sessions are started with
+    start_new_session=True, so both share a process group: killing the group
+    gets both. Killing only the wrapper leaves the plugin holding the port.
+    """
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError, TypeError):
+        return True
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not group_alive(pgid):
+                return True
+            time.sleep(0.1)
+    return False
 
 
 def prune_state(entries):
@@ -316,15 +373,19 @@ def cmd_up(config_name, target_names):
             host, port = target["host"], int(target["port"])
 
         local_port = pick_port(target.get("local_port"))
-        if local_port != target.get("local_port"):
-            print(f"  {name}: port {target.get('local_port')} busy, using {local_port}")
+        wanted = target.get("local_port")
+        if wanted and local_port != wanted:
+            holder = port_holder(wanted)
+            print(f"  {name}: port {wanted} is busy"
+                  + (f" ({holder})" if holder else "")
+                  + f", using {local_port} instead")
 
         log_path = LOG_DIR / f"{config_name}-{name}.log"
         pid = start_session(profile, region, instance_id, host, port,
                             local_port, log_path)
 
         if not wait_for_port(local_port):
-            os.kill(pid, 15)
+            terminate(pid)
             tail = log_path.read_text().strip().splitlines()[-5:]
             raise TunnelError(
                 f"{name}: port {local_port} never opened.\n  " + "\n  ".join(tail)
@@ -374,11 +435,16 @@ def cmd_down(config_name, target_names):
         print("nothing to stop")
         return 0
     for entry in doomed:
-        try:
-            os.kill(entry["pid"], 15)
-        except OSError:
-            pass
-        print(f"stopped {entry['key']} (port {entry['local_port']})")
+        stopped = terminate(entry["pid"])
+        port = entry["local_port"]
+        if stopped and port_is_free(port):
+            print(f"stopped {entry['key']} (port {port} released)")
+        elif stopped:
+            holder = port_holder(port)
+            print(f"stopped {entry['key']}, but port {port} is still held"
+                  + (f" by {holder}" if holder else ""))
+        else:
+            print(f"could not stop {entry['key']} (pid {entry['pid']})")
     keys = {e["key"] for e in doomed}
     save_state([e for e in entries if e["key"] not in keys])
     return 0

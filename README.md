@@ -118,8 +118,9 @@ line per tunnel:
 ○ tst/db :15433 ·5555
 ```
 
-The colour is picked from the config name, so `dev` and `prd` never look alike,
-and the same config keeps its colour across restarts. A grey line with `○` is a
+Every tunnel gets its own colour, keyed on `config/target`, so two clusters in
+the same account never look alike. A tunnel keeps its colour across restarts;
+colours only shift when the set of live tunnels changes. A grey line with `○` is a
 session whose process has died. The last four digits are the account id.
 
 The window joins every Space and is marked `fullScreenAuxiliary`, so it stays

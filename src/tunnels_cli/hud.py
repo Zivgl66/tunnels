@@ -12,6 +12,7 @@ Reads ~/.tunnels/state.json every 2 seconds and quits when it is empty.
 
 import json
 import os
+import zlib
 from pathlib import Path
 
 import objc
@@ -47,7 +48,7 @@ CHAR_WIDTH = FONT_SIZE * 0.62   # monospaced advance, used to size the window
 
 DEAD = (0.55, 0.57, 0.60)       # a dropped session: grey, not shouting
 
-# One colour per config name, so `dev` and `prd` never look alike.
+# One colour per tunnel, so two clusters in the same account still differ.
 PALETTE = [
     (0.22, 0.72, 0.36),   # green
     (0.30, 0.60, 0.95),   # blue
@@ -58,9 +59,33 @@ PALETTE = [
 ]
 
 
-def color_for(config_name):
-    """Same config always gets the same colour, across restarts."""
-    return PALETTE[sum(config_name.encode()) % len(PALETTE)]
+def color_for(key):
+    """A tunnel's preferred colour. Stable across restarts.
+
+    Keyed on "config/target", not on the config alone: two clusters in one
+    account are the common case and they must not look alike. crc32 rather
+    than hash(), which is salted per process and would change every run.
+    """
+    return PALETTE[zlib.crc32(key.encode()) % len(PALETTE)]
+
+
+def assign_colors(keys):
+    """Give every visible tunnel a different colour where the palette allows.
+
+    Each key keeps its preferred colour when it is free. Ties are broken in
+    sorted order, so the result only changes when the set of tunnels changes.
+    """
+    taken = {}
+    for key in sorted(keys):
+        preferred = PALETTE.index(color_for(key))
+        for step in range(len(PALETTE)):
+            slot = (preferred + step) % len(PALETTE)
+            if slot not in taken.values():
+                taken[key] = slot
+                break
+        else:
+            taken[key] = preferred      # more tunnels than colours, reuse
+    return {key: PALETTE[slot] for key, slot in taken.items()}
 
 
 def pid_alive(pid):
@@ -88,6 +113,7 @@ def read_entries():
 def lines_for(entries):
     """One short line per tunnel: dot, config/target, port, account tail."""
     rows = []
+    colors = assign_colors(e["key"] for e in entries)
     for entry in sorted(entries, key=lambda e: e["key"]):
         live = pid_alive(entry.get("pid"))
         account = str(entry.get("account", "?"))[-4:]
@@ -95,7 +121,7 @@ def lines_for(entries):
             f"{'●' if live else '○'} {entry['config']}/{entry['target']} "
             f":{entry['local_port']} ·{account}"
         )
-        rows.append((text, color_for(entry["config"]) if live else DEAD))
+        rows.append((text, colors[entry["key"]] if live else DEAD))
     return rows
 
 

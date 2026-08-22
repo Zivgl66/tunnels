@@ -1,5 +1,6 @@
 """Unit tests for the pure helpers in `tunnels`. No AWS, no network."""
 
+import os
 import socket
 import sys
 from pathlib import Path
@@ -286,3 +287,32 @@ def test_config_block_rejects_a_target_with_no_jump_anywhere():
     }
     with pytest.raises(tunnels.TunnelError):
         tunnels.config_block(config, "dev")
+
+
+def test_terminate_kills_the_whole_process_group():
+    """A session leaves a child holding the port. Both must die."""
+    import subprocess as sp
+    import time as t
+
+    parent = sp.Popen(
+        [sys.executable, "-c",
+         "import subprocess,sys,time;"
+         "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+         "time.sleep(30)"],
+        start_new_session=True,
+    )
+    t.sleep(1.0)
+    pgid = os.getpgid(parent.pid)
+    members = sp.run(["pgrep", "-g", str(pgid)],
+                     capture_output=True, text=True).stdout.split()
+    assert len(members) >= 2, "expected a parent and a child in the group"
+
+    assert tunnels.terminate(parent.pid, timeout=5) is True
+    # No live members left. The parent itself lingers as a zombie until this
+    # process reaps it, which is why the group, not the pid, is the check.
+    assert tunnels.group_alive(pgid) is False
+    parent.wait()
+
+
+def test_terminate_is_fine_with_a_pid_that_is_already_gone():
+    assert tunnels.terminate(999999) is True
