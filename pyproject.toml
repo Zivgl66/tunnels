@@ -29,7 +29,8 @@ dev = ["pytest>=7"]
 tunnels = "tunnels_cli.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/zivgl66/tunnels-cli"
+Homepage = "https://github.com/Zivgl66/tunnels"
+Issues = "https://github.com/Zivgl66/tunnels/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tunnels_cli"]
