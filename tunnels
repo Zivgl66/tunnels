@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""tunnels - start AWS SSM port forward tunnels from a named config."""
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import yaml
+
+STATE_DIR = Path.home() / ".tunnels"
+STATE_FILE = STATE_DIR / "state.json"
+LOG_DIR = STATE_DIR / "logs"
+CONFIG_PATHS = [
+    Path.home() / ".config" / "tunnels" / "config.yaml",
+    Path.cwd() / "config.yaml",
+]
+
+
+class TunnelError(Exception):
+    """Any failure the user needs to read and act on."""
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="tunnels")
+    sub = parser.add_subparsers(dest="command")
+
+    up = sub.add_parser("up", help="start tunnels for a config")
+    up.add_argument("config")
+    up.add_argument("targets", nargs="*")
+
+    down = sub.add_parser("down", help="stop tunnels")
+    down.add_argument("config", help="config name, or 'all'")
+    down.add_argument("targets", nargs="*")
+
+    sub.add_parser("status", help="list live tunnels")
+    sub.add_parser("hud", help="toggle the floating label")
+
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "up":
+            return cmd_up(args.config, args.targets)
+        if args.command == "down":
+            return cmd_down(args.config, args.targets)
+        if args.command == "hud":
+            return cmd_hud()
+        return cmd_status()
+    except TunnelError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,26 @@
+# Copy to ~/.config/tunnels/config.yaml and edit.
+# Each top level key is a config name: `tunnels up dev`.
+
+dev:
+  profile: acme-dev
+  region: il-central-1
+  jump: "tag:Name=jump-server"   # or an instance id: i-0abc123def456
+  hud: true
+  targets:
+    eks-main:
+      eks: my-dev-cluster        # EKS target. The endpoint is looked up.
+      local_port: 9443
+    db:
+      host: mydb.abc.il-central-1.rds.amazonaws.com
+      port: 5432
+      local_port: 15432
+
+prd:
+  profile: acme-fe-prd
+  region: il-central-1
+  jump: "tag:Name=bastion"
+  hud: true
+  targets:
+    eks-main:
+      eks: my-prod-cluster
+      local_port: 9444
