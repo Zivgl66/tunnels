@@ -72,3 +72,25 @@ def test_select_targets_no_names_returns_all():
 def test_select_targets_unknown_name_raises():
     with pytest.raises(tunnels.TunnelError):
         tunnels.select_targets(GOOD["dev"], ["ghost"])
+
+
+def test_pick_port_returns_the_preferred_port_when_it_is_free():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert tunnels.pick_port(free) == free
+
+
+def test_pick_port_falls_back_when_the_preferred_port_is_busy():
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        taken = busy.getsockname()[1]
+        chosen = tunnels.pick_port(taken)
+        assert chosen != taken
+        assert 1024 < chosen < 65536
+
+
+def test_pick_port_with_no_preference_returns_a_usable_port():
+    port = tunnels.pick_port(None)
+    assert 1024 < port < 65536

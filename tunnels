@@ -74,6 +74,25 @@ def select_targets(block, names):
     return {n: targets[n] for n in names}
 
 
+def port_is_free(port):
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def pick_port(preferred):
+    """Use the wanted port if it is free, else let the OS choose one."""
+    if preferred and port_is_free(preferred):
+        return preferred
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
