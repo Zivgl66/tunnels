@@ -1,19 +1,15 @@
 """Unit tests for the pure helpers in `tunnels`. No AWS, no network."""
 
-import importlib.util
 import socket
-from importlib.machinery import SourceFileLoader
+import sys
 from pathlib import Path
 
 import pytest
 
-# `tunnels` has no .py extension, so give importlib an explicit loader.
-_path = Path(__file__).parent / "tunnels"
-spec = importlib.util.spec_from_file_location(
-    "tunnels", _path, loader=SourceFileLoader("tunnels", str(_path))
-)
-tunnels = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(tunnels)
+# Run against the source tree, installed or not.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from tunnels_cli import cli as tunnels  # noqa: E402
 
 
 GOOD = {

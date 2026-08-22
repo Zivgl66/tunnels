@@ -7,33 +7,35 @@ cluster you are pointed at.
 
 ## Requirements
 
-- `aws` CLI v2 with SSO profiles in `~/.aws/config`
-- `session-manager-plugin`
-- `kubectl`
-- Python 3 with `pyyaml`
-- For the floating label: `pyobjc-framework-Cocoa` on `/usr/bin/python3`
+macOS, plus:
 
-```bash
-/usr/bin/python3 -m pip install --user pyobjc-framework-Cocoa
-```
+- `aws` CLI v2 with SSO profiles in `~/.aws/config`
+- `session-manager-plugin` (`brew install --cask session-manager-plugin`)
+- `kubectl`
+- Python 3.9 or newer
+
+`pyyaml` and `pyobjc` are installed for you as package dependencies.
 
 ## Install
 
 ```bash
-./install.sh
+pipx install git+https://github.com/zivgl66/tunnels-cli
+tunnels init          # writes ~/.config/tunnels/config.yaml
 ```
 
-It checks for `aws`, `session-manager-plugin`, `kubectl` and `pyyaml`, installs
-pyobjc for the floating label if it is missing, symlinks `tunnels` into the
-first writable directory on your PATH, and seeds `~/.config/tunnels/config.yaml`
-if you do not have one.
+`pipx` keeps it in its own environment, so nothing lands in your system Python.
+Plain `pip install` works too if you prefer.
 
-It is a symlink, not a copy, so `git pull` updates the command.
+From a local checkout:
 
-Then edit `~/.config/tunnels/config.yaml` and run `tunnels status` from
-anywhere.
+```bash
+pipx install .
+```
 
-To remove it: `rm ~/.local/bin/tunnels` (or wherever the script linked it).
+Behind a TLS-inspecting proxy, add `UV_NATIVE_TLS=1` in front of the command so
+the installer trusts your system certificates.
+
+Then edit `~/.config/tunnels/config.yaml`.
 
 ## Use
 
@@ -44,6 +46,15 @@ tunnels status            # what is live now
 tunnels down dev          # stop one config
 tunnels down all          # stop everything
 tunnels hud               # toggle the floating label
+tunnels init              # write a starter config
+```
+
+## Develop
+
+```bash
+git clone <repo> && cd tunnels
+pip install -e ".[dev]"
+pytest -q
 ```
 
 ## How it works
@@ -81,16 +92,8 @@ visible while another app is fullscreen. It ignores mouse events, so clicks
 pass through to whatever is underneath.
 
 It uses Cocoa through pyobjc, not tkinter: the system Tk on macOS 26 no longer
-draws windows at all.
-
-## Tests
-
-```bash
-/usr/bin/python3 -m pytest test_tunnels.py -q
-```
-
-`/usr/bin/python3` is used because it is the interpreter on this machine with
-pytest available. The tool itself runs on any Python 3 with `pyyaml`.
+draws windows at all. The label runs with the same interpreter the package is
+installed under, so pyobjc always comes from the right environment.
 
 ## Known limits
 

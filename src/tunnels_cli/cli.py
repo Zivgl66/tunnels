@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """tunnels - start AWS SSM port forward tunnels from a named config."""
 
 import argparse
@@ -380,7 +379,6 @@ def cmd_status():
     return 0
 
 
-HUD_PYTHON = "/usr/bin/python3"  # the only interpreter here with tkinter
 HUD_PID_FILE = STATE_DIR / "hud.pid"
 
 
@@ -395,10 +393,9 @@ def hud_running():
 def start_hud():
     if hud_running():
         return
-    script = Path(__file__).resolve().parent / "hud.py"
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
-        [HUD_PYTHON, str(script)],
+        [sys.executable, "-m", "tunnels_cli.hud"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
@@ -418,6 +415,19 @@ def cmd_hud():
     return 0
 
 
+def cmd_init():
+    """Copy the example config into place, without clobbering a real one."""
+    target = CONFIG_PATHS[0]
+    if target.exists():
+        print(f"config already exists at {target}, left alone")
+        return 0
+    example = Path(__file__).resolve().parent / "config.example.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(example.read_text())
+    print(f"wrote {target}\nEdit it, then run: tunnels up dev")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
@@ -431,6 +441,7 @@ def main(argv=None):
     down.add_argument("targets", nargs="*")
 
     sub.add_parser("status", help="list live tunnels")
+    sub.add_parser("init", help="write a starter config file")
     sub.add_parser("hud", help="toggle the floating label")
 
     args = parser.parse_args(argv)
@@ -441,11 +452,18 @@ def main(argv=None):
             return cmd_down(args.config, args.targets)
         if args.command == "hud":
             return cmd_hud()
+        if args.command == "init":
+            return cmd_init()
         return cmd_status()
     except TunnelError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
 
-if __name__ == "__main__":
+def app():
+    """Console script entry point."""
     sys.exit(main())
+
+
+if __name__ == "__main__":
+    app()
