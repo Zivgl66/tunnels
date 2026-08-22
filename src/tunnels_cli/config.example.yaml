@@ -52,16 +52,21 @@ dev:
   jump: "tag:Name=CHANGEME-jump-server"
   hud: true
   targets:
+    # Two clusters in the same account. Each one gets its own SSM session,
+    # its own local port and its own kubectl context, so nothing collides:
+    #     tunnels-dev-main   and   tunnels-dev-apps
+    #
+    #   tunnels up dev          starts both
+    #   tunnels up dev apps     starts only the second
     main:
       eks: CHANGEME-dev-cluster
 
-    # A second cluster in the same account. It gets its own session, its own
-    # port and its own kubectl context, so nothing collides.
-    # apps:
-    #   eks: CHANGEME-apps-cluster
-    #
-    #   # Only needed when this cluster sits behind a different jump host.
-    #   jump: "tag:Name=CHANGEME-other-jump"
+    apps:
+      eks: CHANGEME-apps-cluster
+
+      # Only needed when this cluster sits behind a different jump host.
+      # Without it, the block's jump above is used for both.
+      # jump: "tag:Name=CHANGEME-other-jump"
 
     # A database, reached through the same jump host.
     # orders-db:
