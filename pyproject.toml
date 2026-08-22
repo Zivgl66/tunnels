@@ -9,7 +9,7 @@ description = "Open AWS SSM port forward tunnels to private EKS clusters and dat
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "zivgl66", email = "zivgl66@gmail.com" }]
+authors = [{ name = "zivgl66" }]
 keywords = ["aws", "ssm", "eks", "kubernetes", "tunnel", "bastion", "sso"]
 classifiers = [
   "Environment :: Console",
