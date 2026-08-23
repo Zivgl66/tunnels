@@ -38,6 +38,9 @@ command per environment.**
   AWS session; `doctor --fix` sweeps up what a sleeping laptop left behind.
 - **you always know where you are** — a floating label shows account, cluster
   and port, one colour per tunnel, on top of fullscreen apps.
+- **agents can drive it** — a skill file teaches a coding agent to open the
+  tunnel and use the right context instead of guessing at ports.
+  [how to install it](docs/agent-skill.md)
 - **build the config by asking AWS** — `tunnels discover <profile>` lists the
   clusters in an account and writes the block for you.
 - **small** — about 1,300 lines of Python over three files, `pyyaml` and
@@ -158,6 +161,7 @@ add a new one.
   several clusters in one account, and `tunnels discover`
 - [how it works](docs/how-it-works.md) — the kubeconfig patch, process and
   session lifecycle, the floating label, `tunnels doctor`
+- [agent skill](docs/agent-skill.md) — let a coding agent open tunnels for you
 - [troubleshooting](docs/troubleshooting.md) — every error message, and the
   known limits
 - [backlog](docs/BACKLOG.md) — what is not built yet
