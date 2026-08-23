@@ -36,6 +36,9 @@ command per environment.**
   and port, one colour per tunnel, on top of fullscreen apps.
 - **build the config by asking AWS** — `tunnels discover <profile>` lists the
   clusters in an account and writes the block for you.
+- **small** — about 1,300 lines of Python over three files, `pyyaml` and
+  `pyobjc` its only dependencies. No agent, no container, no background
+  service beyond the tunnels themselves.
 
 ```console
 $ tunnels up dev
@@ -80,6 +83,9 @@ prints the path on its own, so you can pipe it somewhere.
 
 Behind a TLS-inspecting proxy, put `UV_NATIVE_TLS=1` in front of the command so
 the installer trusts your system certificates.
+
+The tool itself is about 50 KB. The virtualenv comes to roughly 31 MB, and
+26 MB of that is `pyobjc`, which draws the floating label.
 
 ## Quick start
 
