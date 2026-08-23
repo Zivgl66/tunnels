@@ -20,6 +20,7 @@ from Cocoa import (
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSBackingStoreBuffered,
+    NSBezierPath,
     NSColor,
     NSFont,
     NSMakeRect,
@@ -46,7 +47,22 @@ CHAR_WIDTH = FONT_SIZE * 0.62   # monospaced advance, used to size the window
 # ponytail: the width is estimated from the character count instead of being
 # measured. It is a monospaced font, so the estimate is close enough.
 
+MARK = 20            # the logo, drawn at this many points square
+MARK_GAP = 8         # space between the logo and the tunnel rows
+
 DEAD = (0.55, 0.57, 0.60)       # a dropped session: grey, not shouting
+
+# The logo: four arcs receding, outermost first. Radii and widths are the
+# same ratios as assets/logo.svg, expressed as a fraction of MARK so the
+# mark keeps its proportions at any size. The colours are the artwork's
+# cool sweep lifted to L=0.70, because the artwork's own L=0.52 goes muddy
+# on the panel's near-black background.
+LOGO_ARCS = [
+    (0.400, 0.100, (0.404, 0.637, 0.893)),
+    (0.283, 0.079, (0.273, 0.668, 0.853)),
+    (0.175, 0.063, (0.143, 0.693, 0.784)),
+    (0.083, 0.050, (0.123, 0.708, 0.693)),
+]
 
 # One colour per tunnel, so two clusters in the same account still differ.
 PALETTE = [
@@ -138,6 +154,30 @@ def make_field(text, rgb, y, width):
     return field
 
 
+class LogoView(NSView):
+    """The mark, stroked with NSBezierPath rather than loaded from a file.
+
+    Drawing it keeps the package free of a binary asset and stays sharp on
+    any display scale. The arcs are concentric half circles sharing a centre
+    on the mark's horizontal axis.
+    """
+
+    def drawRect_(self, _rect):
+        size = self.bounds().size
+        span = min(size.width, size.height)
+        cx = size.width / 2.0
+        cy = size.height / 2.0 - span * 0.20   # the arcs sit above the centre
+
+        for radius, width, rgb in LOGO_ARCS:
+            path = NSBezierPath.bezierPath()
+            path.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
+                (cx, cy), span * radius, 0.0, 180.0,
+            )
+            path.setLineWidth_(span * width)
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(*rgb, 1.0).set()
+            path.stroke()
+
+
 class Hud(NSObject):
     def initWithWindow_(self, window):
         self = objc.super(Hud, self).init()
@@ -154,8 +194,9 @@ class Hud(NSObject):
     @objc.python_method
     def draw(self, entries):
         rows = lines_for(entries)
-        height = PAD * 2 + LINE * len(rows)
-        width = int(max(len(text) for text, _ in rows) * CHAR_WIDTH) + PAD * 3
+        height = max(PAD * 2 + LINE * len(rows), PAD * 2 + MARK)
+        text_width = int(max(len(text) for text, _ in rows) * CHAR_WIDTH)
+        width = text_width + MARK + MARK_GAP + PAD * 3
 
         screen = NSScreen.mainScreen().frame()
         frame = NSMakeRect(
@@ -173,6 +214,11 @@ class Hud(NSObject):
             NSColor.colorWithCalibratedRed_green_blue_alpha_(
                 0.06, 0.08, 0.10, 0.82).CGColor()
         )
+
+        logo = LogoView.alloc().initWithFrame_(
+            NSMakeRect(PAD, height - PAD - MARK, MARK, MARK)
+        )
+        content.addSubview_(logo)
 
         y = height - PAD
         for text, rgb in rows:

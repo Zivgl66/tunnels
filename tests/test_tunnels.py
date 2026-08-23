@@ -514,3 +514,30 @@ def test_keepalive_run_exits_when_no_tunnels_are_left(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
     assert keepalive.run(interval=0) == 0
+
+
+def _logo_arcs():
+    """Radius and stroke width of each arc in the logo, outermost first."""
+    import re
+
+    svg = (Path(__file__).resolve().parents[1] / "assets" / "logo.svg").read_text()
+    arcs = re.findall(
+        r'd="M([\d.]+) 84 A([\d.]+) [\d.]+ 0 0 1 ([\d.]+) 84".*?stroke-width="([\d.]+)"',
+        svg,
+    )
+    return [(float(x1), float(r), float(x2), float(w)) for x1, r, x2, w in arcs]
+
+
+def test_logo_arcs_are_centred_and_closed():
+    arcs = _logo_arcs()
+    assert len(arcs) == 4
+    for x1, r, x2, _ in arcs:
+        assert x1 == 60 - r and x2 == 60 + r
+
+
+def test_logo_arcs_never_touch_and_stay_in_the_viewbox():
+    bands = [(r - w / 2, r + w / 2) for _, r, _, w in _logo_arcs()]
+    for (_, outer_in), (inner_out, _) in zip(bands, bands[1:]):
+        assert outer_in - inner_out >= 2, "arcs closer than 2 units read as one blob"
+    widest, widest_w = max((r, w) for _, r, _, w in _logo_arcs())
+    assert 60 - widest - widest_w / 2 >= 0 and 84 - widest - widest_w / 2 >= 0

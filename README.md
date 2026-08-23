@@ -1,6 +1,10 @@
 # tunnels
 
 <p align="center">
+  <img src="assets/logo.svg" alt="" width="96" />
+</p>
+
+<p align="center">
   <a href="#install">install</a> ·
   <a href="#quick-start">quick start</a> ·
   <a href="#commands">commands</a> ·

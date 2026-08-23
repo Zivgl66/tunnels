@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="tunnels">
+  <title>tunnels</title>
+  <g fill="none" stroke="currentColor" stroke-linecap="butt">
+    <path d="M12 84 A48 48 0 0 1 108 84" stroke-width="12"/>
+    <path d="M26 84 A34 34 0 0 1 94 84" stroke-width="9.5"/>
+    <path d="M39 84 A21 21 0 0 1 81 84" stroke-width="7.5"/>
+    <path d="M50 84 A10 10 0 0 1 70 84" stroke-width="6"/>
+  </g>
+</svg>
