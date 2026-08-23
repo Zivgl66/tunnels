@@ -11,6 +11,7 @@ Reads ~/.tunnels/state.json every 2 seconds and quits when it is empty.
 """
 
 import json
+import math
 import os
 import zlib
 from pathlib import Path
@@ -22,7 +23,9 @@ from Cocoa import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSAttributedString,
     NSFont,
+    NSFontAttributeName,
     NSMakeRect,
     NSObject,
     NSScreen,
@@ -43,9 +46,6 @@ FONT_SIZE = 11.0
 LINE = 14
 PAD = 6
 MARGIN = 16          # gap from the screen edges
-CHAR_WIDTH = FONT_SIZE * 0.62   # monospaced advance, used to size the window
-# ponytail: the width is estimated from the character count instead of being
-# measured. It is a monospaced font, so the estimate is close enough.
 
 MARK = 20            # the logo, drawn at this many points square
 MARK_GAP = 8         # space between the logo and the tunnel rows
@@ -141,6 +141,89 @@ def lines_for(entries):
     return rows
 
 
+def row_font():
+    return NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, 0.3)
+
+
+def text_width(texts, font):
+    """Measure the widest row, rather than guessing a character advance.
+
+    The rows carry the dot and separator glyphs, which do not advance at a
+    plain monospaced width. Asking the font is exact and costs nothing at
+    this size.
+    """
+    widest = 0.0
+    for text in texts:
+        attributed = NSAttributedString.alloc().initWithString_attributes_(
+            text, {NSFontAttributeName: font}
+        )
+        widest = max(widest, attributed.size().width)
+    return math.ceil(widest)
+
+
+def as_visible(screen):
+    """An NSScreen's usable area as a plain dict, so the maths stays testable."""
+    rect = screen.visibleFrame()
+    return {
+        "x": rect.origin.x, "y": rect.origin.y,
+        "width": rect.size.width, "height": rect.size.height,
+    }
+
+
+def screen_key(visible):
+    """A screen's identity: where it sits and how big it is."""
+    return (visible["x"], visible["y"], visible["width"], visible["height"])
+
+
+def choose_screen(screens, active, remembered):
+    """Stay on the screen the label started on, while it is still attached.
+
+    mainScreen follows the focused window, so using it every tick made the
+    label hop between displays as you moved. The first draw remembers a
+    screen and later draws keep it. If that display is unplugged or
+    rearranged its key stops matching, and the label moves to the active
+    screen rather than to nowhere.
+    """
+    if remembered is not None:
+        for screen in screens:
+            if screen_key(screen) == remembered:
+                return screen
+    return active
+
+
+def fit_panel(visible, width, height, margin=MARGIN):
+    """Measure first, then apply: size the panel to the screen it lands on.
+
+    Returns the panel rect, capped so it always fits between the margins of
+    that screen whatever the rows contain, and never wider or taller than
+    the screen itself.
+    """
+    max_width = max(1, int(visible["width"]) - margin * 2)
+    max_height = max(1, int(visible["height"]) - margin * 2)
+    return min(width, max_width), min(height, max_height)
+
+
+def top_right_origin(visible, width, height, margin=MARGIN):
+    """Where a panel of this size sits in the screen's top right corner.
+
+    Screen coordinates are GLOBAL, not per screen: a display to the left of
+    the built-in one starts at a negative x. Positioning from the size alone
+    computed a coordinate for the active screen and then applied it on the
+    primary one, which put the panel over the right edge of the laptop.
+
+    The result is clamped into the screen so a panel can never hang off an
+    edge, whatever its size. visibleFrame already excludes the menu bar and
+    the Dock, so there is no fudge factor for either.
+    """
+    left, bottom = visible["x"], visible["y"]
+    right = left + visible["width"]
+    top = bottom + visible["height"]
+
+    x = min(right - width - margin, right - width)
+    y = min(top - height - margin, top - height)
+    return max(x, left), max(y, bottom)
+
+
 def make_field(text, rgb, y, width):
     field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, width, LINE))
     field.setStringValue_(text)
@@ -149,7 +232,7 @@ def make_field(text, rgb, y, width):
     field.setEditable_(False)
     field.setSelectable_(False)
     field.setAlignment_(2)  # NSTextAlignmentRight
-    field.setFont_(NSFont.monospacedSystemFontOfSize_weight_(FONT_SIZE, 0.3))
+    field.setFont_(row_font())
     field.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(*rgb, 1.0))
     return field
 
@@ -182,6 +265,7 @@ class Hud(NSObject):
     def initWithWindow_(self, window):
         self = objc.super(Hud, self).init()
         self.window = window
+        self.screen = None      # set on the first draw, then kept
         return self
 
     def tick_(self, _timer):
@@ -194,16 +278,27 @@ class Hud(NSObject):
     @objc.python_method
     def draw(self, entries):
         rows = lines_for(entries)
-        height = max(PAD * 2 + LINE * len(rows), PAD * 2 + MARK)
-        text_width = int(max(len(text) for text, _ in rows) * CHAR_WIDTH)
-        width = text_width + MARK + MARK_GAP + PAD * 3
 
-        screen = NSScreen.mainScreen().frame()
-        frame = NSMakeRect(
-            screen.size.width - width - MARGIN,
-            screen.size.height - height - MARGIN - 28,  # clear of the menu bar
-            width, height,
+        # Measure the screen the panel will land on before sizing anything to
+        # it. The label stays on the screen it started on, so this re-reads
+        # the display layout every tick but only follows focus the first time.
+        visible = choose_screen(
+            [as_visible(s) for s in NSScreen.screens()],
+            as_visible(NSScreen.mainScreen()),
+            self.screen,
         )
+        self.screen = screen_key(visible)
+
+        # Then measure the content.
+        font = row_font()
+        width = text_width([text for text, _ in rows], font) + \
+            MARK + MARK_GAP + PAD * 3
+        height = max(PAD * 2 + LINE * len(rows), PAD * 2 + MARK)
+
+        # Only then apply, capped and clamped to that screen.
+        width, height = fit_panel(visible, width, height)
+        x, y_origin = top_right_origin(visible, width, height)
+        frame = NSMakeRect(x, y_origin, width, height)
         self.window.setFrame_display_(frame, True)
 
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
