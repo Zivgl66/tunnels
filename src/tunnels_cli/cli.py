@@ -322,6 +322,17 @@ def resolve_jump(profile, region, jump):
             f"no running instance with tag {key}={value} in {region} "
             f"for profile '{profile}'"
         )
+    online = aws(
+        profile, region, "ssm", "describe-instance-information",
+        "--filters", f"Key=InstanceIds,Values={','.join(ids)}",
+        "--query", "InstanceInformationList[?PingStatus=='Online'].InstanceId",
+    ) or []
+    ids = [i for i in ids if i in online]
+    if not ids:
+        raise TunnelError(
+            f"no instance with tag {key}={value} in {region} has a connected "
+            f"SSM agent for profile '{profile}'"
+        )
     if len(ids) > 1:
         print(f"warning: {len(ids)} instances match {key}={value}. Using {ids[0]}.")
     return ids[0]
