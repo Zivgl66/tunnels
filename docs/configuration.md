@@ -10,6 +10,7 @@ dev:                                    # tunnels up dev
   region: eu-west-1
   jump: "tag:Name=shared-bastion"           # default jump for the targets below
   hud: true
+  keepalive: 300                            # optional, see "Idle timeouts" below
   targets:
     platform:
       eks: platform-cluster                 # an EKS target
@@ -30,6 +31,7 @@ dev:                                    # tunnels up dev
 | `region` | block | yes | The account's region |
 | `jump` | block or target | yes, in one of the two | Instance id (`i-0abc...`) or tag lookup (`tag:Key=Value`) |
 | `hud` | block | no | `true` starts the floating label with the tunnels |
+| `keepalive` | block | no | Seconds between pokes, or `true` for 300. Omit it and keepalive stays off |
 | `targets` | block | yes | One entry per cluster or host |
 | `eks` | target | one of the two | EKS cluster name. The endpoint is looked up |
 | `host` + `port` | target | one of the two | Any host the jump can reach |
@@ -98,3 +100,44 @@ profile name.
 
 Nothing is written until the last question, and that one defaults to no.
 An existing block with the same name is never overwritten.
+
+## Idle timeouts
+
+`tunnels` sets no timeout of its own. A tunnel lives until AWS ends it, you
+run `tunnels down`, or the laptop sleeps.
+
+AWS ends it on two account-wide Session Manager settings, both in the
+`SSM-SessionManagerRunShell` document:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `idleSessionTimeout` | 20 minutes | Closes a session with no traffic. Settable 1-60 |
+| `maxSessionDuration` | not set | Closes a session whatever it is doing. Settable 1-1440 |
+
+Read the real numbers for an account:
+
+```bash
+aws --profile my-profile --region eu-west-1 ssm get-document \
+  --name SSM-SessionManagerRunShell --query Content --output text
+```
+
+Neither can be set per session, so `tunnels` cannot change them for one
+environment. What it can do is keep the session busy:
+
+```bash
+tunnels up dev --keepalive        # every 300 seconds
+tunnels up dev --keepalive 120    # every 120 seconds
+```
+
+Or set `keepalive` on the block to have it start with every `up`. The flag
+wins over the config, so `--keepalive 60` overrides `keepalive: 300`.
+
+Keepalive is **off unless you ask for it**. When on, one detached process
+opens and closes a connection to each live tunnel's local port on the
+interval. That single stream is enough traffic for the session to count as
+active. The process reads the same `~/.tunnels/state.json` as every command,
+and exits by itself once the last tunnel is gone.
+
+Pick an interval below `idleSessionTimeout`, with room to spare: 300 seconds
+against the 20 minute default. It does not defeat `maxSessionDuration`, which
+ignores activity.

@@ -33,6 +33,16 @@ stale one fails loudly on a dead port, which is clearer than a context that
 quietly disappears, and the next `up` repairs it. `/etc/hosts` is never
 involved at all, because `tls-server-name` does that job.
 
+## Keepalive
+
+An SSM session with no traffic is closed by AWS after the account's
+`idleSessionTimeout`. `tunnels up --keepalive [SECONDS]` starts one detached
+process that opens and closes a connection to every live tunnel's local port
+on that interval, which is enough for the session to count as active. It
+reads `~/.tunnels/state.json` like every other command and exits once no
+tunnels are left, so it adds no daemon to babysit. Off unless asked for.
+See [configuration](configuration.md#idle-timeouts).
+
 ## The floating label
 
 One short line per tunnel, in the top right corner:

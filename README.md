@@ -129,6 +129,7 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | --- | --- |
 | `tunnels up <env>` | Start every target in that config block |
 | `tunnels up <env> <target>...` | Start only the named targets |
+| `tunnels up <env> --keepalive [SECONDS]` | Also keep the sessions from idling out. Default 300s. Off unless asked for |
 | `tunnels status` | List live tunnels. Same as bare `tunnels` |
 | `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |
 | `tunnels down all` | Stop everything |

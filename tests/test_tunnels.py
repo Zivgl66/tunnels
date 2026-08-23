@@ -482,3 +482,35 @@ def test_cmd_config_raises_when_there_is_no_config(tmp_path, monkeypatch):
     monkeypatch.setattr(tunnels, "CONFIG_PATHS", [tmp_path / "missing.yaml"])
     with pytest.raises(tunnels.TunnelError):
         tunnels.cmd_config(path_only=True)
+
+
+def test_keepalive_interval_flag_wins_over_the_config():
+    assert tunnels.keepalive_interval({"keepalive": 120}, 30) == 30
+
+
+def test_keepalive_interval_reads_the_config_when_there_is_no_flag():
+    assert tunnels.keepalive_interval({"keepalive": 120}, None) == 120
+    assert tunnels.keepalive_interval({"keepalive": True}, None) == tunnels.KEEPALIVE_DEFAULT
+
+
+def test_keepalive_interval_is_off_by_default():
+    assert tunnels.keepalive_interval({}, None) is None
+    assert tunnels.keepalive_interval({"keepalive": False}, None) is None
+
+
+def test_keepalive_poke_connects_to_a_listening_port():
+    from tunnels_cli import keepalive
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        assert keepalive.poke(port) is True
+    assert keepalive.poke(port) is False
+
+
+def test_keepalive_run_exits_when_no_tunnels_are_left(tmp_path, monkeypatch):
+    from tunnels_cli import keepalive
+
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    assert keepalive.run(interval=0) == 0
