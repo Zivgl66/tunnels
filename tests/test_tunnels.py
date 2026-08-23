@@ -468,3 +468,17 @@ def test_render_block_output_validates_as_a_config():
     )
     config = _yaml.safe_load(text)
     assert tunnels.config_block(config, "dev")["profile"] == "p"
+
+
+def test_cmd_config_path_prints_the_first_existing_config(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("{}")
+    monkeypatch.setattr(tunnels, "CONFIG_PATHS", [tmp_path / "missing.yaml", cfg])
+    assert tunnels.cmd_config(path_only=True) == 0
+    assert capsys.readouterr().out.strip() == str(cfg)
+
+
+def test_cmd_config_raises_when_there_is_no_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(tunnels, "CONFIG_PATHS", [tmp_path / "missing.yaml"])
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.cmd_config(path_only=True)

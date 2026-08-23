@@ -45,7 +45,8 @@ pipx install git+https://github.com/Zivgl66/tunnels.git && tunnels init
 ```
 
 `tunnels init` writes `~/.config/tunnels/config.yaml` and opens it in your
-editor.
+editor. To edit it again later, run `tunnels config`. `tunnels config --path`
+prints the path on its own, so you can pipe it somewhere.
 
 Behind a TLS-inspecting proxy, put `UV_NATIVE_TLS=1` in front of the command so
 the installer trusts your system certificates.
@@ -100,6 +101,7 @@ kubectl --context tunnels-my-env-<target> get nodes
 | `tunnels down all` | Stop everything |
 | `tunnels hud` | Turn the floating label on or off |
 | `tunnels init` | Create and open the config file |
+| `tunnels config` | Open the existing config file. `--path` prints the path only |
 | `tunnels discover <profile>` | Build a config block by asking the account what it has |
 | `tunnels doctor` | Find leftover tunnels and AWS sessions. `--fix` cleans them up |
 

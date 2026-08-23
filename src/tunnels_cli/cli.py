@@ -878,6 +878,23 @@ def cmd_init():
     return 0
 
 
+def cmd_config(path_only):
+    """Show where the config lives, and open it unless only the path is wanted."""
+    target = next((c for c in CONFIG_PATHS if c.is_file()), None)
+    if target is None:
+        looked = ", ".join(str(c) for c in CONFIG_PATHS)
+        raise TunnelError(
+            f"no config file found. Looked in: {looked}\n"
+            "Run 'tunnels init' to create one."
+        )
+    print(target)
+    if path_only:
+        return 0
+    if not open_in_editor(target):
+        print("no $EDITOR set - open the path above yourself")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
@@ -892,6 +909,9 @@ def main(argv=None):
 
     sub.add_parser("status", help="list live tunnels")
     sub.add_parser("init", help="write a starter config file")
+
+    cfg = sub.add_parser("config", help="open the config file, or print its path")
+    cfg.add_argument("--path", action="store_true", help="print the path only")
 
     doctor = sub.add_parser("doctor", help="find leftover tunnels and sessions")
     doctor.add_argument("--fix", action="store_true", help="clean up what it finds")
@@ -910,6 +930,8 @@ def main(argv=None):
             return cmd_down(args.config, args.targets)
         if args.command == "hud":
             return cmd_hud()
+        if args.command == "config":
+            return cmd_config(args.path)
         if args.command == "init":
             return cmd_init()
         if args.command == "doctor":
