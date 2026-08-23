@@ -541,3 +541,74 @@ def test_logo_arcs_never_touch_and_stay_in_the_viewbox():
         assert outer_in - inner_out >= 2, "arcs closer than 2 units read as one blob"
     widest, widest_w = max((r, w) for _, r, _, w in _logo_arcs())
     assert 60 - widest - widest_w / 2 >= 0 and 84 - widest - widest_w / 2 >= 0
+
+
+def _hud():
+    """Import hud without pyobjc: the geometry helpers are pure Python."""
+    import types
+
+    if "tunnels_cli.hud" in sys.modules:
+        return sys.modules["tunnels_cli.hud"]
+    cocoa = types.ModuleType("Cocoa")
+    for name in (
+        "NSApplication", "NSApplicationActivationPolicyAccessory",
+        "NSBackingStoreBuffered", "NSBezierPath", "NSColor", "NSFont",
+        "NSMakeRect", "NSObject", "NSScreen", "NSTextField", "NSTimer",
+        "NSView", "NSWindow", "NSAttributedString", "NSFontAttributeName",
+        "NSWindowCollectionBehaviorCanJoinAllSpaces",
+        "NSWindowCollectionBehaviorFullScreenAuxiliary",
+        "NSWindowCollectionBehaviorStationary", "NSWindowStyleMaskBorderless",
+    ):
+        setattr(cocoa, name, object)
+    objc = types.ModuleType("objc")
+    objc.super = super
+    objc.python_method = lambda f: f
+    sys.modules.setdefault("Cocoa", cocoa)
+    sys.modules.setdefault("objc", objc)
+    from tunnels_cli import hud
+
+    return hud
+
+
+# The three displays that exposed the bug: two sit at a negative x, because
+# screen coordinates are global rather than per screen.
+SCREENS = [
+    {"x": 0.0, "y": 0.0, "width": 1728.0, "height": 1084.0},
+    {"x": -1920.0, "y": 37.0, "width": 1920.0, "height": 1080.0},
+    {"x": -3840.0, "y": 37.0, "width": 1920.0, "height": 1080.0},
+]
+
+
+def _fits(screen, x, y, width, height):
+    return (
+        x >= screen["x"]
+        and x + width <= screen["x"] + screen["width"]
+        and y >= screen["y"]
+        and y + height <= screen["y"] + screen["height"]
+    )
+
+
+def test_panel_lands_inside_every_screen():
+    hud = _hud()
+    for screen in SCREENS:
+        width, height = hud.fit_panel(screen, 230, 46)
+        x, y = hud.top_right_origin(screen, width, height)
+        assert _fits(screen, x, y, width, height), screen
+
+
+def test_panel_too_big_for_the_screen_is_capped_not_clipped():
+    hud = _hud()
+    for screen in SCREENS:
+        width, height = hud.fit_panel(screen, 5000, 4000)
+        x, y = hud.top_right_origin(screen, width, height)
+        assert _fits(screen, x, y, width, height), screen
+
+
+def test_panel_sits_in_the_top_right_of_its_own_screen():
+    hud = _hud()
+    for screen in SCREENS:
+        width, height = hud.fit_panel(screen, 230, 46)
+        x, y = hud.top_right_origin(screen, width, height)
+        right_gap = screen["x"] + screen["width"] - (x + width)
+        top_gap = screen["y"] + screen["height"] - (y + height)
+        assert right_gap == hud.MARGIN and top_gap == hud.MARGIN
