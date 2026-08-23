@@ -612,3 +612,23 @@ def test_panel_sits_in_the_top_right_of_its_own_screen():
         right_gap = screen["x"] + screen["width"] - (x + width)
         top_gap = screen["y"] + screen["height"] - (y + height)
         assert right_gap == hud.MARGIN and top_gap == hud.MARGIN
+
+
+def test_hud_stays_on_the_screen_it_started_on():
+    hud = _hud()
+    laptop, external = SCREENS[0], SCREENS[1]
+    remembered = hud.screen_key(external)
+    # focus moved to the laptop, but the label started on the external one
+    assert hud.choose_screen(SCREENS, laptop, remembered) == external
+
+
+def test_hud_picks_the_active_screen_on_the_first_draw():
+    hud = _hud()
+    assert hud.choose_screen(SCREENS, SCREENS[1], None) == SCREENS[1]
+
+
+def test_hud_falls_back_when_its_screen_is_unplugged():
+    hud = _hud()
+    remembered = hud.screen_key(SCREENS[2])
+    attached = SCREENS[:2]
+    assert hud.choose_screen(attached, SCREENS[0], remembered) == SCREENS[0]

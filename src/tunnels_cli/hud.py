@@ -161,6 +161,36 @@ def text_width(texts, font):
     return math.ceil(widest)
 
 
+def as_visible(screen):
+    """An NSScreen's usable area as a plain dict, so the maths stays testable."""
+    rect = screen.visibleFrame()
+    return {
+        "x": rect.origin.x, "y": rect.origin.y,
+        "width": rect.size.width, "height": rect.size.height,
+    }
+
+
+def screen_key(visible):
+    """A screen's identity: where it sits and how big it is."""
+    return (visible["x"], visible["y"], visible["width"], visible["height"])
+
+
+def choose_screen(screens, active, remembered):
+    """Stay on the screen the label started on, while it is still attached.
+
+    mainScreen follows the focused window, so using it every tick made the
+    label hop between displays as you moved. The first draw remembers a
+    screen and later draws keep it. If that display is unplugged or
+    rearranged its key stops matching, and the label moves to the active
+    screen rather than to nowhere.
+    """
+    if remembered is not None:
+        for screen in screens:
+            if screen_key(screen) == remembered:
+                return screen
+    return active
+
+
 def fit_panel(visible, width, height, margin=MARGIN):
     """Measure first, then apply: size the panel to the screen it lands on.
 
@@ -235,6 +265,7 @@ class Hud(NSObject):
     def initWithWindow_(self, window):
         self = objc.super(Hud, self).init()
         self.window = window
+        self.screen = None      # set on the first draw, then kept
         return self
 
     def tick_(self, _timer):
@@ -249,13 +280,14 @@ class Hud(NSObject):
         rows = lines_for(entries)
 
         # Measure the screen the panel will land on before sizing anything to
-        # it. mainScreen follows the focused window, so this is re-read every
-        # tick rather than assumed.
-        frame_rect = NSScreen.mainScreen().visibleFrame()
-        visible = {
-            "x": frame_rect.origin.x, "y": frame_rect.origin.y,
-            "width": frame_rect.size.width, "height": frame_rect.size.height,
-        }
+        # it. The label stays on the screen it started on, so this re-reads
+        # the display layout every tick but only follows focus the first time.
+        visible = choose_screen(
+            [as_visible(s) for s in NSScreen.screens()],
+            as_visible(NSScreen.mainScreen()),
+            self.screen,
+        )
+        self.screen = screen_key(visible)
 
         # Then measure the content.
         font = row_font()
