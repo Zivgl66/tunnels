@@ -32,6 +32,11 @@
 #               (tag:Key=Value). Set it on the block, on a target, or both.
 #               A target's own jump wins. Every target needs one somehow.
 #   hud         true starts the floating label along with the tunnels
+#   keepalive   optional. Seconds between pokes that stop AWS closing the
+#               session for being idle (20 minutes, account-wide, by
+#               default). true means 300. Omit it and keepalive stays off;
+#               'tunnels up <env> --keepalive [SECONDS]' turns it on for
+#               one run and overrides this value.
 #   targets     one entry per cluster or host
 #
 # Each target is either an EKS cluster:

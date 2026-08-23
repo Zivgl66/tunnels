@@ -401,7 +401,7 @@ def terminate_session(profile, region, session_id):
     return result.returncode == 0
 
 
-def cmd_up(config_name, target_names):
+def cmd_up(config_name, target_names, keepalive=None):
     config = load_config()
     block = config_block(config, config_name)
     targets = select_targets(block, target_names)
@@ -476,6 +476,13 @@ def cmd_up(config_name, target_names):
 
     if block.get("hud"):
         start_hud()
+
+    interval = keepalive_interval(block, keepalive)
+    if interval:
+        if start_keepalive(interval):
+            print(f"keepalive every {interval}s")
+        else:
+            print("keepalive already running")
     return 0
 
 
@@ -533,6 +540,8 @@ def cmd_status():
 
 
 HUD_PID_FILE = STATE_DIR / "hud.pid"
+KEEPALIVE_PID_FILE = STATE_DIR / "keepalive.pid"
+KEEPALIVE_DEFAULT = 300
 
 
 def hud_running():
@@ -553,6 +562,38 @@ def start_hud():
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
     HUD_PID_FILE.write_text(str(proc.pid))
+
+
+def keepalive_running():
+    try:
+        pid = int(KEEPALIVE_PID_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+    return pid if pid_alive(pid) else None
+
+
+def keepalive_interval(block, flag):
+    """The flag wins over the config block. None means leave it off."""
+    if flag is not None:
+        return flag
+    value = block.get("keepalive")
+    if value in (None, False):
+        return None
+    return KEEPALIVE_DEFAULT if value is True else int(value)
+
+
+def start_keepalive(interval):
+    """One detached process serves every tunnel, like the hud does."""
+    if keepalive_running():
+        return False
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tunnels_cli.keepalive", str(interval)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+    KEEPALIVE_PID_FILE.write_text(str(proc.pid))
+    return True
 
 
 def cmd_hud():
@@ -902,6 +943,12 @@ def main(argv=None):
     up = sub.add_parser("up", help="start tunnels for a config")
     up.add_argument("config")
     up.add_argument("targets", nargs="*")
+    up.add_argument(
+        "--keepalive", nargs="?", type=int, const=KEEPALIVE_DEFAULT, default=None,
+        metavar="SECONDS",
+        help=f"poke each tunnel so the SSM session never idles out "
+             f"(default {KEEPALIVE_DEFAULT}s). Off unless asked for",
+    )
 
     down = sub.add_parser("down", help="stop tunnels")
     down.add_argument("config", help="config name, or 'all'")
@@ -925,7 +972,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "up":
-            return cmd_up(args.config, args.targets)
+            return cmd_up(args.config, args.targets, args.keepalive)
         if args.command == "down":
             return cmd_down(args.config, args.targets)
         if args.command == "hud":

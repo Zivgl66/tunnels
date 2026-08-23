@@ -9,6 +9,7 @@
 | `port 9443 is busy (com.docker.backend)` | Another program owns that port | Remove `local_port` and let the tool choose |
 | `certificate is valid for ...` from kubectl | The kubeconfig patch did not land | `tunnels down <env> && tunnels up <env>` |
 | A tunnel shows grey in the label | The session dropped | `tunnels up <env>` again |
+| Tunnels die after ~20 minutes unused | The account's SSM `idleSessionTimeout` | `tunnels up <env> --keepalive`. See [configuration](configuration.md#idle-timeouts) |
 | SSO opens a browser every time | The token is genuinely expiring | Normal. It only logs in when the cached token has gone |
 
 ## Known limits
