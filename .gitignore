@@ -16,7 +16,7 @@ tunnels.yaml
 # Tooling and local notes, not shipped to the repo
 .serena/
 .claude/
-docs/
+docs/superpowers/
 
 # Runtime state, in case anyone points TUNNELS state at the repo.
 state.json
