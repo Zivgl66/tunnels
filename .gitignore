@@ -21,3 +21,6 @@ docs/superpowers/
 # Runtime state, in case anyone points TUNNELS state at the repo.
 state.json
 *.log
+
+# scratch file written by scripts/release.py, not committed
+.release-notes.md

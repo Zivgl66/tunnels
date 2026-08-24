@@ -11,3 +11,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
   arrow-key menu to pick an account and a target (or "all"), then starts
   that tunnel. `tunnels status` still shows live tunnels as before.
   Breaking: no.
+- PR title gate: PR titles must follow conventional-commit format
+  (`type(scope)?: description`), enforced in CI. Breaking: no.
+- Automated releases: every merge to `main` now bumps the version, updates
+  this changelog, tags, and publishes a GitHub Release with no extra PR.
+  Breaking: no.

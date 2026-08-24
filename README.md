@@ -178,19 +178,28 @@ pip install -e ".[dev]" && pytest -q
 The tests cover the pure parts: config validation, port choice, state pruning,
 the kubeconfig patch, and process group cleanup. They make no AWS calls.
 
+PR titles must follow `type(scope)?: description` (`feat`, `fix`, `docs`,
+`chore`, `refactor`, `test`, `perf`, `build`, `ci`; add `!` for a breaking
+change, e.g. `feat!: ...`) — enforced by `.github/workflows/pr-title.yml`.
+Squash-merging keeps that title as the commit on `main`, which is what
+decides the next release's version bump.
+
 ## Releasing
 
-After a PR merges to `main`, whoever merged it cuts a release:
+Fully automated, no extra PR: `.github/workflows/release.yml` runs on every
+push to `main` (i.e. every merge) and, from the commit messages since the
+last tag, decides the bump (`feat` → minor, `!` or "breaking" → major,
+otherwise patch), bumps `pyproject.toml`, turns the CHANGELOG's
+`[Unreleased]` section into a dated release section, commits, tags, and
+publishes a GitHub Release with those notes — including whether it's
+breaking.
 
-1. Bump the version in `pyproject.toml` (`[project] version = "..."`),
-   following [SemVer](https://semver.org/): MAJOR for breaking changes,
-   MINOR for new features, PATCH for fixes.
-2. Move the `[Unreleased]` entry in `CHANGELOG.md` under a new
-   `## [x.y.z] - YYYY-MM-DD` heading, and note whether it breaks
-   compatibility (`Breaking: yes`/`no`) for each change.
-3. Tag the release: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-
-No CI automation yet — this is a manual checklist.
+**One-time setup:** branch protection on `main` requires a PR review, and an
+admin's push bypasses that but a plain `GITHUB_TOKEN` push does not. Create
+a personal access token from an account with admin/write access to this
+repo (`repo` scope), and add it as the repository secret `RELEASE_TOKEN`.
+Until that secret exists, the release job fails at the push step; nothing
+else in the repo is affected.
 
 ## License
 

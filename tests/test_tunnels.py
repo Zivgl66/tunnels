@@ -703,3 +703,46 @@ def test_cmd_interactive_no_accounts_raises(monkeypatch):
     monkeypatch.setattr(tunnels, "load_config", lambda: {})
     with pytest.raises(tunnels.TunnelError):
         tunnels.cmd_interactive()
+
+
+def _release():
+    import importlib.util
+
+    if "release" in sys.modules:
+        return sys.modules["release"]
+    path = Path(__file__).resolve().parents[1] / "scripts" / "release.py"
+    spec = importlib.util.spec_from_file_location("release", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["release"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_bump_kind_picks_patch_with_no_signal():
+    release = _release()
+    assert release.bump_kind(["docs: tidy readme"]) == "patch"
+
+
+def test_bump_kind_picks_minor_for_a_feat_commit():
+    release = _release()
+    assert release.bump_kind(["docs: tidy readme", "feat: add widget"]) == "minor"
+
+
+def test_bump_kind_picks_major_for_a_bang_commit():
+    release = _release()
+    assert release.bump_kind(["feat!: drop old config format"]) == "major"
+
+
+def test_bump_version_patch():
+    release = _release()
+    assert release.bump_version("1.2.3", "patch") == "1.2.4"
+
+
+def test_bump_version_minor_resets_patch():
+    release = _release()
+    assert release.bump_version("1.2.3", "minor") == "1.3.0"
+
+
+def test_bump_version_major_resets_minor_and_patch():
+    release = _release()
+    assert release.bump_version("1.2.3", "major") == "2.0.0"
