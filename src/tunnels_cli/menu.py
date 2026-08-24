@@ -36,11 +36,15 @@ def _restore_mode(fd, old):
     termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+HINT = "(↑/↓ or j/k move, enter select, q cancel)"
+
+
 def _draw(title, options, index, out, use_color, first):
-    if not first:
-        out.write(f"\033[{len(options)}A")
+    if first:
+        out.write(f"{title}\n{HINT}\n")
+        out.write("\x1b7")  # save cursor: right after the header
     else:
-        out.write(f"{title}\n")
+        out.write("\x1b8")  # restore: back to right after the header
     for i, opt in enumerate(options):
         marker = "> " if i == index else "  "
         if use_color and i == index:
@@ -54,7 +58,7 @@ def _draw(title, options, index, out, use_color, first):
 
 
 def _numbered_fallback(title, options, out):
-    out.write(f"{title}\n")
+    out.write(f"{title}\n(number, blank to cancel)\n")
     for i, opt in enumerate(options, 1):
         out.write(f"  {i}) {opt}\n")
     out.flush()
