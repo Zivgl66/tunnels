@@ -1,0 +1,14 @@
+# Changelog
+
+All notable changes to this project are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project uses [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+### Added
+- PR title gate: PR titles must follow conventional-commit format
+  (`type(scope)?: description`), enforced in CI. Breaking: no.
+- Automated releases: every merge to `main` now bumps the version, updates
+  this changelog, tags, and publishes a GitHub Release with no extra PR.
+  Breaking: no.
