@@ -143,7 +143,8 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels up <env>` | Start every target in that config block |
 | `tunnels up <env> <target>...` | Start only the named targets |
 | `tunnels up <env> --keepalive [SECONDS]` | Also keep the sessions from idling out. Default 300s. Off unless asked for |
-| `tunnels status` | List live tunnels. Same as bare `tunnels` |
+| `tunnels` (no args) | Interactive picker: pick an account, then a target or `all`, and start it |
+| `tunnels status` | List live tunnels |
 | `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |
 | `tunnels down all` | Stop everything |
 | `tunnels hud` | Turn the floating label on or off |
@@ -176,6 +177,20 @@ pip install -e ".[dev]" && pytest -q
 
 The tests cover the pure parts: config validation, port choice, state pruning,
 the kubeconfig patch, and process group cleanup. They make no AWS calls.
+
+## Releasing
+
+After a PR merges to `main`, whoever merged it cuts a release:
+
+1. Bump the version in `pyproject.toml` (`[project] version = "..."`),
+   following [SemVer](https://semver.org/): MAJOR for breaking changes,
+   MINOR for new features, PATCH for fixes.
+2. Move the `[Unreleased]` entry in `CHANGELOG.md` under a new
+   `## [x.y.z] - YYYY-MM-DD` heading, and note whether it breaks
+   compatibility (`Breaking: yes`/`no`) for each change.
+3. Tag the release: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+No CI automation yet — this is a manual checklist.
 
 ## License
 

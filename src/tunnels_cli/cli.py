@@ -13,6 +13,8 @@ from pathlib import Path
 
 import yaml
 
+from tunnels_cli.menu import menu
+
 STATE_DIR = Path.home() / ".tunnels"
 STATE_FILE = STATE_DIR / "state.json"
 LOG_DIR = STATE_DIR / "logs"
@@ -607,6 +609,28 @@ def start_keepalive(interval):
     return True
 
 
+def cmd_interactive():
+    """No subcommand given: pick an account and a target, then start it."""
+    config = load_config()
+    accounts = sorted(config)
+    if not accounts:
+        raise TunnelError("no accounts configured. Run 'tunnels init'.")
+
+    account = menu("Which account?", accounts)
+    if account is None:
+        return 0
+
+    block = config_block(config, account)
+    target_names = sorted(block["targets"])
+    choices = target_names + ["all"]
+
+    target = menu(f"Which target in '{account}'?", choices)
+    if target is None:
+        return 0
+
+    return cmd_up(account, [] if target == "all" else [target])
+
+
 def cmd_hud():
     """Toggle: start it when it is off, stop it when it is on."""
     pid = hud_running()
@@ -997,7 +1021,7 @@ def main(argv=None):
         if args.command == "discover":
             region = args.region or profile_region(args.profile)
             return cmd_discover(args.profile, region, args.name or args.profile)
-        return cmd_status()
+        return cmd_interactive()
     except TunnelError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

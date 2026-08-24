@@ -632,3 +632,74 @@ def test_hud_falls_back_when_its_screen_is_unplugged():
     remembered = hud.screen_key(SCREENS[2])
     attached = SCREENS[:2]
     assert hud.choose_screen(attached, SCREENS[0], remembered) == SCREENS[0]
+
+
+from tunnels_cli.menu import menu  # noqa: E402
+
+
+def test_menu_numbered_fallback_picks_by_number(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt="": "2")
+    result = menu("Pick one", ["alpha", "beta", "gamma"], read_key="fallback")
+    assert result == "beta"
+
+
+def test_menu_numbered_fallback_rejects_out_of_range(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt="": "9")
+    result = menu("Pick one", ["alpha", "beta"], read_key="fallback")
+    assert result is None
+
+
+def test_menu_arrow_navigation_and_enter():
+    keys = iter(["\x1b[B", "\x1b[B", "\x1b[A", "\r"])  # down, down, up, enter
+    result = menu("Pick one", ["alpha", "beta", "gamma"], read_key=lambda: next(keys))
+    assert result == "beta"
+
+
+def test_menu_cancel_returns_none():
+    keys = iter(["q"])
+    result = menu("Pick one", ["alpha", "beta"], read_key=lambda: next(keys))
+    assert result is None
+
+
+def test_menu_rejects_empty_options():
+    with pytest.raises(ValueError):
+        menu("Pick one", [], read_key=lambda: "\r")
+
+
+def test_cmd_interactive_picks_account_then_all_targets(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    picks = iter(["dev", "all"])
+    monkeypatch.setattr(tunnels, "menu", lambda title, options: next(picks))
+    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+
+    result = tunnels.cmd_interactive()
+
+    assert result == 0
+    assert calls == [("dev", [])]
+
+
+def test_cmd_interactive_picks_account_then_one_target(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    picks = iter(["dev", "db"])
+    monkeypatch.setattr(tunnels, "menu", lambda title, options: next(picks))
+    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+
+    tunnels.cmd_interactive()
+
+    assert calls == [("dev", ["db"])]
+
+
+def test_cmd_interactive_cancel_at_account_step_returns_zero(monkeypatch):
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "menu", lambda title, options: None)
+    monkeypatch.setattr(tunnels, "cmd_up", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+
+    assert tunnels.cmd_interactive() == 0
+
+
+def test_cmd_interactive_no_accounts_raises(monkeypatch):
+    monkeypatch.setattr(tunnels, "load_config", lambda: {})
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.cmd_interactive()
