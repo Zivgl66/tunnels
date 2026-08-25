@@ -972,6 +972,22 @@ def cmd_config(path_only):
     return 0
 
 
+def cmd_profiles():
+    """List the accounts configured, with their AWS profile and targets."""
+    config = load_config()
+    if not config:
+        print("no accounts configured. Run 'tunnels init'.")
+        return 0
+    width = max(len(name) for name in config)
+    for name in sorted(config):
+        block = config[name]
+        profile = block.get("profile", "?")
+        region = block.get("region", "?")
+        targets = ", ".join(sorted(block.get("targets", {})))
+        print(f"  {name:<{width}}  {profile}  {region}  {targets}")
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
     sub = parser.add_subparsers(dest="command")
@@ -991,6 +1007,7 @@ def main(argv=None):
     down.add_argument("targets", nargs="*")
 
     sub.add_parser("status", help="list live tunnels")
+    sub.add_parser("profiles", help="list configured accounts")
     sub.add_parser("init", help="write a starter config file")
 
     cfg = sub.add_parser("config", help="open the config file, or print its path")
@@ -1011,6 +1028,8 @@ def main(argv=None):
             return cmd_up(args.config, args.targets, args.keepalive)
         if args.command == "down":
             return cmd_down(args.config, args.targets)
+        if args.command == "profiles":
+            return cmd_profiles()
         if args.command == "hud":
             return cmd_hud()
         if args.command == "config":
