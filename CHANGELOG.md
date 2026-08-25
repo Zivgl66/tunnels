@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-25
+
 ### Added
 - Interactive picker: running `tunnels` with no subcommand now opens an
   arrow-key menu to pick an account and a target (or "all"), then starts
