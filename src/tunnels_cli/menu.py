@@ -37,15 +37,33 @@ def _restore_mode(fd, old):
 
 
 HINT = "(↑/↓ or j/k move, enter select, q cancel)"
+PAGE_SIZE = 10
 
 
-def _draw(title, options, index, out, use_color, first):
-    if first:
-        out.write(f"{title}\n{HINT}\n")
-        out.write("\x1b7")  # save cursor: right after the header
-    else:
-        out.write("\x1b8")  # restore: back to right after the header
-    for i, opt in enumerate(options):
+def _window_start(index, page_size, total):
+    """Clamp the visible window so `index` is always on screen."""
+    if total <= page_size:
+        return 0
+    start = min(index, total - page_size)
+    return max(0, start if index >= start else index)
+
+
+def _draw(title, options, index, out, use_color, first, page_size):
+    total = len(options)
+    slots = min(page_size, total)
+    start = _window_start(index, page_size, total)
+
+    hint = HINT
+    if total > page_size:
+        hint = f"{HINT} — {start + 1}-{start + slots} of {total}"
+
+    if not first:
+        out.write(f"\033[{slots + 2}A")  # back up over title + hint + option slots
+    out.write("\033[2K" + title + "\r\n")
+    out.write("\033[2K" + hint + "\r\n")
+
+    for i in range(start, start + slots):
+        opt = options[i]
         marker = "> " if i == index else "  "
         if use_color and i == index:
             line = f"{marker}{BOLD_CYAN}{opt}{RESET}"
@@ -53,7 +71,17 @@ def _draw(title, options, index, out, use_color, first):
             line = f"{marker}{DIM}{opt}{RESET}"
         else:
             line = f"{marker}{opt}"
-        out.write("\033[2K" + line + "\n")
+        out.write("\033[2K" + line + "\r\n")
+    out.flush()
+    return slots
+
+
+def _clear(out, lines):
+    """Erase a just-drawn menu block (title + hint + option slots) in place."""
+    out.write(f"\033[{lines}A")
+    for _ in range(lines):
+        out.write("\033[2K\r\n")
+    out.write(f"\033[{lines}A")
     out.flush()
 
 
@@ -71,9 +99,14 @@ def _numbered_fallback(title, options, out):
     return options[int(choice) - 1]
 
 
-def menu(title, options, read_key=None, out=None):
+def menu(title, options, read_key=None, out=None, page_size=PAGE_SIZE):
     """Show an arrow-key picker. Returns the chosen option, or None if
     cancelled (q / Ctrl-C / an out-of-range fallback number).
+
+    Redraws in place - the block (title, hint, visible options) is erased
+    before the caller's next output, so chained menu() calls replace each
+    other on screen instead of stacking. Lists longer than `page_size` show
+    a scrolling window with a "start-end of total" indicator in the hint.
 
     `read_key`, if given, is called with no arguments to get the next
     keypress instead of reading the real terminal - this is how tests drive
@@ -100,9 +133,10 @@ def menu(title, options, read_key=None, out=None):
 
     index = 0
     first = True
+    slots = min(page_size, len(options))
     try:
         while True:
-            _draw(title, options, index, out, use_color, first)
+            slots = _draw(title, options, index, out, use_color, first, page_size)
             first = False
             key = reader()
             if key in CANCEL_KEYS:
@@ -116,3 +150,4 @@ def menu(title, options, read_key=None, out=None):
     finally:
         if fd is not None:
             _restore_mode(fd, old)
+        _clear(out, slots + 2)
