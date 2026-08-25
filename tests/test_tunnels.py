@@ -699,6 +699,20 @@ def test_cmd_interactive_cancel_at_account_step_returns_zero(monkeypatch):
     assert tunnels.cmd_interactive() == 0
 
 
+def test_cmd_interactive_cancel_at_target_step_goes_back_to_account_step(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    # account, target(cancel), account again, target
+    picks = iter(["dev", None, "dev", "db"])
+    monkeypatch.setattr(tunnels, "menu", lambda title, options: next(picks))
+    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+
+    result = tunnels.cmd_interactive()
+
+    assert result == 0
+    assert calls == [("dev", ["db"])]
+
+
 def test_cmd_interactive_no_accounts_raises(monkeypatch):
     monkeypatch.setattr(tunnels, "load_config", lambda: {})
     with pytest.raises(tunnels.TunnelError):

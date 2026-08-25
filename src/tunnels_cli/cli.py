@@ -616,19 +616,20 @@ def cmd_interactive():
     if not accounts:
         raise TunnelError("no accounts configured. Run 'tunnels init'.")
 
-    account = menu("Which account?", accounts)
-    if account is None:
-        return 0
+    while True:
+        account = menu("Which account?", accounts)
+        if account is None:
+            return 0
 
-    block = config_block(config, account)
-    target_names = sorted(block["targets"])
-    choices = target_names + ["all"]
+        block = config_block(config, account)
+        target_names = sorted(block["targets"])
+        choices = target_names + ["all"]
 
-    target = menu(f"Which target in '{account}'?", choices)
-    if target is None:
-        return 0
+        target = menu(f"Which target in '{account}'?", choices)
+        if target is None:
+            continue  # q at this step goes back to the account list
 
-    return cmd_up(account, [] if target == "all" else [target])
+        return cmd_up(account, [] if target == "all" else [target])
 
 
 def cmd_hud():

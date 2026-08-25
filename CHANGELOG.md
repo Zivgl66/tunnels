@@ -16,3 +16,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 - Automated releases: every merge to `main` now bumps the version, updates
   this changelog, tags, and publishes a GitHub Release with no extra PR.
   Breaking: no.
+
+### Fixed
+- Interactive picker: the menu no longer drifts/jumps when it's drawn near
+  the bottom of the terminal (redraw now uses save/restore-cursor instead
+  of counting lines). `q` at the target step now goes back to the account
+  list instead of exiting, and both menu steps show a hint for the keys.
+  Breaking: no.
