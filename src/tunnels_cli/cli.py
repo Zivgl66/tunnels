@@ -414,7 +414,52 @@ def terminate_session(profile, region, session_id):
     return result.returncode == 0
 
 
-def cmd_up(config_name, target_names, keepalive=None):
+HOSTS_PATH = Path("/etc/hosts")
+
+
+def hosts_marker(key):
+    return f"# tunnels:{key}"
+
+
+def add_hosts_entry(hostname, key):
+    """Point hostname at 127.0.0.1, so a client dialing the real DNS name
+    (e.g. a terraform provider that hardcodes it) lands on the tunnel instead.
+
+    /etc/hosts has no notion of port, so this only gets you halfway: the
+    caller still has to point its own port config (kubeapi_port, etc.) at
+    the tunnel's local_port for the connection to actually land anywhere.
+    Requires root, so this shells out to sudo - expect a password prompt.
+    """
+    remove_hosts_entry(key)  # replace any stale line for this key first
+    line = f"127.0.0.1 {hostname} {hosts_marker(key)}\n"
+    result = subprocess.run(
+        ["sudo", "tee", "-a", str(HOSTS_PATH)],
+        input=line, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise TunnelError(
+            f"could not add /etc/hosts entry for {hostname}: {result.stderr.strip()}"
+        )
+
+
+def remove_hosts_entry(key):
+    marker = hosts_marker(key)
+    try:
+        text = HOSTS_PATH.read_text()
+    except OSError:
+        return
+    if marker not in text:
+        return
+    kept = "\n".join(l for l in text.splitlines() if marker not in l) + "\n"
+    result = subprocess.run(
+        ["sudo", "tee", str(HOSTS_PATH)],
+        input=kept, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise TunnelError(f"could not remove /etc/hosts entry: {result.stderr.strip()}")
+
+
+def cmd_up(config_name, target_names, keepalive=None, terraform=False):
     config = load_config()
     block = config_block(config, config_name)
     targets = select_targets(block, target_names)
@@ -431,6 +476,14 @@ def cmd_up(config_name, target_names, keepalive=None):
         key = f"{config_name}/{name}"
         if key in running:
             print(f"  {name}: already up, skipping")
+            if terraform:
+                existing = next(e for e in entries if e["key"] == key)
+                add_hosts_entry(existing["remote_host"], key)
+                existing["hosts_entry"] = True
+                save_state(entries)
+                print(f"  {name}: /etc/hosts patched, {existing['remote_host']} -> "
+                      f"127.0.0.1. Point terraform's port var at "
+                      f"{existing['local_port']}.")
             continue
 
         jump = jump_for(block, name, target)
@@ -472,6 +525,10 @@ def cmd_up(config_name, target_names, keepalive=None):
             "started": time.time(),
         }
 
+        if terraform:
+            add_hosts_entry(host, key)
+            entry["hosts_entry"] = True
+
         if "eks" in target:
             alias = f"tunnels-{config_name}-{name}"
             update_kubeconfig(profile, region, target["eks"], alias)
@@ -482,6 +539,10 @@ def cmd_up(config_name, target_names, keepalive=None):
         else:
             print(f"  {name}: up on {local_port} via {instance_id} "
                   f"-> {host}:{port}")
+
+        if terraform:
+            print(f"  {name}: /etc/hosts patched, {host} -> 127.0.0.1. "
+                  f"Point terraform's port var at {local_port}.")
 
         entries.append(entry)
         save_state(entries)
@@ -515,6 +576,8 @@ def cmd_down(config_name, target_names):
         print("nothing to stop")
         return 0
     for entry in doomed:
+        if entry.get("hosts_entry"):
+            remove_hosts_entry(entry["key"])
         stopped = terminate(entry["pid"])
         closed = terminate_session(
             entry.get("profile"), entry.get("region"), entry.get("session_id")
@@ -1001,6 +1064,12 @@ def main(argv=None):
         help=f"poke each tunnel so the SSM session never idles out "
              f"(default {KEEPALIVE_DEFAULT}s). Off unless asked for",
     )
+    up.add_argument(
+        "--terraform", action="store_true",
+        help="patch /etc/hosts so the real hostname resolves to 127.0.0.1, "
+             "for tools (like terraform) that dial it directly instead of "
+             "using the kubeconfig. Removed again on 'down'",
+    )
 
     down = sub.add_parser("down", help="stop tunnels")
     down.add_argument("config", help="config name, or 'all'")
@@ -1025,7 +1094,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "up":
-            return cmd_up(args.config, args.targets, args.keepalive)
+            return cmd_up(args.config, args.targets, args.keepalive, args.terraform)
         if args.command == "down":
             return cmd_down(args.config, args.targets)
         if args.command == "profiles":

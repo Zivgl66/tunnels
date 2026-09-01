@@ -2,6 +2,7 @@
 
 import os
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -196,6 +197,71 @@ def test_patch_kubeconfig_unknown_context_raises():
 
 def test_endpoint_host_strips_the_scheme():
     assert tunnels.endpoint_host("https://ABC.eks.amazonaws.com") == "ABC.eks.amazonaws.com"
+
+
+def _fake_sudo_tee(hosts_path):
+    """Stand in for `sudo tee [-a]`: writes/appends stdin to hosts_path."""
+    def run(cmd, input, **kw):
+        assert cmd[:2] == ["sudo", "tee"]
+        mode = "a" if "-a" in cmd else "w"
+        with hosts_path.open(mode) as f:
+            f.write(input)
+        return subprocess.CompletedProcess(cmd, 0)
+    return run
+
+
+def test_add_hosts_entry_appends_a_marked_line(tmp_path, monkeypatch):
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    monkeypatch.setattr(tunnels, "HOSTS_PATH", hosts)
+    monkeypatch.setattr(tunnels.subprocess, "run", _fake_sudo_tee(hosts))
+
+    tunnels.add_hosts_entry("cluster.eks.amazonaws.com", "dev/mgmt-dev")
+
+    text = hosts.read_text()
+    assert "127.0.0.1 cluster.eks.amazonaws.com # tunnels:dev/mgmt-dev" in text
+    assert "127.0.0.1 localhost" in text
+
+
+def test_add_hosts_entry_replaces_a_stale_line_for_the_same_key(tmp_path, monkeypatch):
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 old.example.com # tunnels:dev/mgmt-dev\n")
+    monkeypatch.setattr(tunnels, "HOSTS_PATH", hosts)
+    monkeypatch.setattr(tunnels.subprocess, "run", _fake_sudo_tee(hosts))
+
+    tunnels.add_hosts_entry("new.example.com", "dev/mgmt-dev")
+
+    text = hosts.read_text()
+    assert "old.example.com" not in text
+    assert "127.0.0.1 new.example.com # tunnels:dev/mgmt-dev" in text
+
+
+def test_remove_hosts_entry_drops_only_the_marked_line(tmp_path, monkeypatch):
+    hosts = tmp_path / "hosts"
+    hosts.write_text(
+        "127.0.0.1 localhost\n"
+        "127.0.0.1 cluster.eks.amazonaws.com # tunnels:dev/mgmt-dev\n"
+    )
+    monkeypatch.setattr(tunnels, "HOSTS_PATH", hosts)
+    monkeypatch.setattr(tunnels.subprocess, "run", _fake_sudo_tee(hosts))
+
+    tunnels.remove_hosts_entry("dev/mgmt-dev")
+
+    text = hosts.read_text()
+    assert "cluster.eks.amazonaws.com" not in text
+    assert "127.0.0.1 localhost" in text
+
+
+def test_remove_hosts_entry_is_a_noop_when_the_key_is_absent(tmp_path, monkeypatch):
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1 localhost\n")
+    monkeypatch.setattr(tunnels, "HOSTS_PATH", hosts)
+
+    def fail(*a, **kw):
+        raise AssertionError("sudo should not run when there is nothing to remove")
+    monkeypatch.setattr(tunnels.subprocess, "run", fail)
+
+    tunnels.remove_hosts_entry("dev/nothing-here")
 
 
 def test_wait_for_port_returns_true_once_something_listens():
