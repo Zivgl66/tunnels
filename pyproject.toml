@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tunnels-cli"
-version = "0.3.0"
+version = "0.4.0"
 description = "Open AWS SSM port forward tunnels to private EKS clusters and databases through a jump host, patch kubeconfig, and float an on-screen label of the account and cluster in use."
 readme = "README.md"
 requires-python = ">=3.9"
