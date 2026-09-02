@@ -10,15 +10,18 @@ sticky ports, per-target jump hosts, AWS-side session cleanup.
 
 ### 1. Reconnect dropped sessions
 An SSM session dies when the laptop sleeps or the network changes. Today the
-floating label turns grey and you run `tunnels up` again.
+floating label turns grey, the local process can hang around holding a dead
+port, and you run `tunnels up` again yourself.
 
-A `tunnels watch` could restart dead sessions on its own. The cost is a
-long-running process, which the current design avoids on purpose: every
-command prunes dead entries instead, so there is nothing to babysit.
+The cleanup half of this is done: `up` now always starts a watchdog process
+that clears a tunnel automatically once its port stops accepting
+connections (`--ttl` adds an opt-in wall-clock close on top). What is still
+missing is restarting it - the watchdog only stops a dead tunnel, it does
+not bring it back.
 
-Do it when a dropped session actually interrupts work often enough to notice.
-Cheaper first step: have the label flash or notify on a drop, and keep the
-restart manual.
+Do the restart when a dropped session actually interrupts work often enough
+to notice. Cheaper first step: have the label flash or notify on a drop, and
+keep the restart manual.
 
 ### 2. Better region handling for `discover`
 `--region` is easy to get wrong. A profile's configured region is often not
