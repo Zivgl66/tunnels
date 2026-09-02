@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-02
+
 ### Added
 - Every `up` now starts a detached watchdog (shared by every tunnel, like
   keepalive) that clears a tunnel automatically once its local port stops
