@@ -8,6 +8,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.5.0] - 2026-09-02
 
+### Added
+- `tunnels --version` prints the installed version, matching the GitHub
+  release tag. Breaking: no.
+
 ## [0.4.0] - 2026-09-01
 
 ## [0.3.0] - 2026-08-25
