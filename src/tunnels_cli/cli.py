@@ -460,7 +460,7 @@ def remove_hosts_entry(key):
         raise TunnelError(f"could not remove /etc/hosts entry: {result.stderr.strip()}")
 
 
-def cmd_up(config_name, target_names, keepalive=None, terraform=False):
+def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None):
     config = load_config()
     block = config_block(config, config_name)
     targets = select_targets(block, target_names)
@@ -558,6 +558,13 @@ def cmd_up(config_name, target_names, keepalive=None, terraform=False):
             print(f"keepalive every {interval}s")
         else:
             print("keepalive already running")
+
+    minutes = ttl_minutes(block, ttl)
+    if minutes:
+        if start_watchdog(minutes):
+            print(f"auto-closes after {minutes}m, or sooner if the port dies")
+        else:
+            print("watchdog already running")
     return 0
 
 
@@ -570,6 +577,34 @@ def matching_entries(entries, config_name, target_names):
     return picked
 
 
+def stop_entry(entry, reason=None):
+    """Stop one tracked tunnel and drop it from the state file.
+
+    Shared by `down` (explicit) and the ttl watchdog (automatic), so both
+    stop a tunnel the same way: kill the process group, close the AWS
+    session, undo any /etc/hosts patch.
+    """
+    if entry.get("hosts_entry"):
+        remove_hosts_entry(entry["key"])
+    stopped = terminate(entry["pid"])
+    closed = terminate_session(
+        entry.get("profile"), entry.get("region"), entry.get("session_id")
+    )
+    port = entry["local_port"]
+    tag = f" ({reason})" if reason else ""
+    note = "" if closed else ", aws session left to time out"
+    if stopped and port_is_free(port):
+        print(f"stopped {entry['key']}{tag} (port {port} released{note})")
+    elif stopped:
+        holder = port_holder(port)
+        print(f"stopped {entry['key']}{tag}, but port {port} is still held"
+              + (f" by {holder}" if holder else ""))
+    else:
+        print(f"could not stop {entry['key']}{tag} (pid {entry['pid']})")
+    save_state([e for e in load_state() if e["key"] != entry["key"]])
+    return stopped
+
+
 def cmd_down(config_name, target_names):
     entries = live_state()
     doomed = matching_entries(entries, config_name, target_names)
@@ -577,24 +612,7 @@ def cmd_down(config_name, target_names):
         print("nothing to stop")
         return 0
     for entry in doomed:
-        if entry.get("hosts_entry"):
-            remove_hosts_entry(entry["key"])
-        stopped = terminate(entry["pid"])
-        closed = terminate_session(
-            entry.get("profile"), entry.get("region"), entry.get("session_id")
-        )
-        port = entry["local_port"]
-        note = "" if closed else ", aws session left to time out"
-        if stopped and port_is_free(port):
-            print(f"stopped {entry['key']} (port {port} released{note})")
-        elif stopped:
-            holder = port_holder(port)
-            print(f"stopped {entry['key']}, but port {port} is still held"
-                  + (f" by {holder}" if holder else ""))
-        else:
-            print(f"could not stop {entry['key']} (pid {entry['pid']})")
-    keys = {e["key"] for e in doomed}
-    save_state([e for e in entries if e["key"] not in keys])
+        stop_entry(entry)
     return 0
 
 
@@ -670,6 +688,47 @@ def start_keepalive(interval):
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
     KEEPALIVE_PID_FILE.write_text(str(proc.pid))
+    return True
+
+
+WATCHDOG_PID_FILE = STATE_DIR / "watchdog.pid"
+WATCHDOG_DEFAULT_MINUTES = 480
+
+
+def watchdog_running():
+    try:
+        pid = int(WATCHDOG_PID_FILE.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+    return pid if pid_alive(pid) else None
+
+
+def ttl_minutes(block, flag):
+    """The flag wins over the config block. None means leave it off."""
+    if flag is not None:
+        return flag
+    value = block.get("ttl")
+    if value in (None, False):
+        return None
+    return WATCHDOG_DEFAULT_MINUTES if value is True else int(value)
+
+
+def start_watchdog(minutes):
+    """One detached process watches every tunnel, like keepalive does.
+
+    Unlike keepalive it also force-closes a tunnel whose local port has
+    stopped accepting connections (the session died on the AWS side but
+    the local process is still hanging around), regardless of ttl.
+    """
+    if watchdog_running():
+        return False
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tunnels_cli.watchdog", str(minutes)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+    WATCHDOG_PID_FILE.write_text(str(proc.pid))
     return True
 
 
@@ -1075,6 +1134,13 @@ def main(argv=None):
              "for tools (like terraform) that dial it directly instead of "
              "using the kubeconfig. Removed again on 'down'",
     )
+    up.add_argument(
+        "--ttl", nargs="?", type=int, const=WATCHDOG_DEFAULT_MINUTES, default=None,
+        metavar="MINUTES",
+        help=f"auto-close tunnels after this many minutes, and sooner if a "
+             f"tunnel's port dies while the process lingers (default "
+             f"{WATCHDOG_DEFAULT_MINUTES}m). Off unless asked for",
+    )
 
     down = sub.add_parser("down", help="stop tunnels")
     down.add_argument("config", help="config name, or 'all'")
@@ -1099,7 +1165,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "up":
-            return cmd_up(args.config, args.targets, args.keepalive, args.terraform)
+            return cmd_up(args.config, args.targets, args.keepalive, args.terraform, args.ttl)
         if args.command == "down":
             return cmd_down(args.config, args.targets)
         if args.command == "profiles":

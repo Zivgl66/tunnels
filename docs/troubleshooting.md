@@ -9,12 +9,16 @@
 | `port 9443 is busy (com.docker.backend)` | Another program owns that port | Remove `local_port` and let the tool choose |
 | `certificate is valid for ...` from kubectl | The kubeconfig patch did not land | `tunnels down <env> && tunnels up <env>` |
 | A tunnel shows grey in the label | The session dropped | `tunnels up <env>` again |
+| The local process/port lingers after the session is already dead | No auto-reconnect and no self-cleanup by default | `tunnels doctor --fix` now, or start with `--ttl` next time so it closes itself |
 | Tunnels die after ~20 minutes unused | The account's SSM `idleSessionTimeout` | `tunnels up <env> --keepalive`. See [configuration](configuration.md#idle-timeouts) |
 | SSO opens a browser every time | The token is genuinely expiring | Normal. It only logs in when the cached token has gone |
 
 ## Known limits
 
 - No auto-reconnect. A dropped session shows grey until you run `up` again.
+- No self-cleanup by default. The local process can outlive a dropped AWS
+  session; `tunnels doctor --fix` clears it, or start with `--ttl` so it
+  clears itself.
 - `down` leaves the kubectl context in place. It fails loudly if you use it,
   and `up` repairs it.
 - Sessions killed outside the tool stay `Connected` on the AWS side until they

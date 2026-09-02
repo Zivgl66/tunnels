@@ -6,6 +6,12 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `--ttl [MINUTES]`: auto-close tunnels after this long, and sooner if a
+  tunnel's port dies while the process lingers. One detached watchdog
+  process, shared by every tunnel like keepalive's. Off unless asked for.
+  Breaking: no.
+
 ## [0.5.1] - 2026-09-02
 
 ## [0.5.0] - 2026-09-02

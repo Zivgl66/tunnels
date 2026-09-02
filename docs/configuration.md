@@ -11,6 +11,7 @@ dev:                                    # tunnels up dev
   jump: "tag:Name=shared-bastion"           # default jump for the targets below
   hud: true
   keepalive: 300                            # optional, see "Idle timeouts" below
+  ttl: 480                                  # optional, minutes before auto-close
   targets:
     platform:
       eks: platform-cluster                 # an EKS target
@@ -32,6 +33,7 @@ dev:                                    # tunnels up dev
 | `jump` | block or target | yes, in one of the two | Instance id (`i-0abc...`) or tag lookup (`tag:Key=Value`) |
 | `hud` | block | no | `true` starts the floating label with the tunnels |
 | `keepalive` | block | no | Seconds between pokes, or `true` for 300. Omit it and keepalive stays off |
+| `ttl` | block | no | Minutes before a tunnel auto-closes, or `true` for 480. Omit it and ttl stays off |
 | `targets` | block | yes | One entry per cluster or host |
 | `eks` | target | one of the two | EKS cluster name. The endpoint is looked up |
 | `host` + `port` | target | one of the two | Any host the jump can reach |
@@ -103,8 +105,9 @@ An existing block with the same name is never overwritten.
 
 ## Idle timeouts
 
-`tunnels` sets no timeout of its own. A tunnel lives until AWS ends it, you
-run `tunnels down`, or the laptop sleeps.
+By default `tunnels` sets no timeout of its own. A tunnel lives until AWS
+ends it, you run `tunnels down`, or the laptop sleeps — unless you opt into
+`--ttl` (below), which closes it after a fixed time regardless.
 
 AWS ends it on two account-wide Session Manager settings, both in the
 `SSM-SessionManagerRunShell` document:
@@ -141,3 +144,23 @@ and exits by itself once the last tunnel is gone.
 Pick an interval below `idleSessionTimeout`, with room to spare: 300 seconds
 against the 20 minute default. It does not defeat `maxSessionDuration`, which
 ignores activity.
+
+## Auto-close (ttl)
+
+A tunnel's local process does not always exit when the AWS side of the
+session ends — it can hang around holding the port with nothing behind it.
+`--ttl` cleans that up:
+
+```bash
+tunnels up dev --ttl              # auto-close after 480 minutes
+tunnels up dev --ttl 60           # auto-close after 60 minutes
+```
+
+Or set `ttl` on the block. The flag wins over the config, same as keepalive.
+
+Ttl is **off unless you ask for it**. When on, one detached process (like
+keepalive's) checks every live tunnel once a minute and stops it if either:
+the tunnel is older than the ttl, or its local port has stopped accepting
+connections — which closes stray processes immediately, regardless of ttl.
+It stops a tunnel the same way `tunnels down` does: kills the process group,
+closes the AWS session, undoes any `--terraform` `/etc/hosts` patch.

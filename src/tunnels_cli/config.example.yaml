@@ -37,6 +37,10 @@
 #               default). true means 300. Omit it and keepalive stays off;
 #               'tunnels up <env> --keepalive [SECONDS]' turns it on for
 #               one run and overrides this value.
+#   ttl         optional. Minutes before a tunnel auto-closes, and sooner
+#               if its port dies while the process lingers. true means 480.
+#               Omit it and ttl stays off; 'tunnels up <env> --ttl [MINUTES]'
+#               turns it on for one run and overrides this value.
 #   targets     one entry per cluster or host
 #
 # Each target is either an EKS cluster:
