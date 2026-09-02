@@ -7,10 +7,12 @@ and this project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- `--ttl [MINUTES]`: auto-close tunnels after this long, and sooner if a
-  tunnel's port dies while the process lingers. One detached watchdog
-  process, shared by every tunnel like keepalive's. Off unless asked for.
-  Breaking: no.
+- Every `up` now starts a detached watchdog (shared by every tunnel, like
+  keepalive) that clears a tunnel automatically once its local port stops
+  accepting connections. No flag needed; it never touches a healthy
+  tunnel. Breaking: no.
+- `--ttl [MINUTES]`: opt-in, on top of the above. Also auto-closes tunnels
+  after this long, healthy or not. Breaking: no.
 
 ## [0.5.1] - 2026-09-02
 

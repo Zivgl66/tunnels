@@ -60,20 +60,21 @@ reads `~/.tunnels/state.json` like every other command and exits once no
 tunnels are left, so it adds no daemon to babysit. Off unless asked for.
 See [configuration](configuration.md#idle-timeouts).
 
-## Auto-close (ttl)
+## Auto-close (watchdog and ttl)
 
 A tunnel's local process (`aws ssm start-session` plus the
 `session-manager-plugin` child it spawns) does not always exit when the AWS
 side of the session ends, so it can hang around holding the port with
 nothing behind it — the case `tunnels doctor` calls a stray port forward
-process. `tunnels up --ttl [MINUTES]` starts one detached process, shared by
-every tunnel like keepalive's, that checks each tunnel once a minute and
-stops it — kills the process group, closes the AWS session, undoes any
-`--terraform` `/etc/hosts` patch — the moment either is true: the tunnel is
-older than the ttl, or its local port has stopped accepting connections.
-The port check fires regardless of ttl, so a stray process gets cleared
-quickly even with a long or no ttl. Off unless asked for. See
-[configuration](configuration.md#auto-close-ttl).
+process. Every `up` starts one detached watchdog process, shared by every
+tunnel like keepalive's, that checks each tunnel once a minute and stops
+it — kills the process group, closes the AWS session, undoes any
+`--terraform` `/etc/hosts` patch — the moment its local port stops
+accepting connections. This part needs no flag; it always runs.
+
+`tunnels up --ttl [MINUTES]` adds a second, opt-in check on top: the same
+watchdog also stops a tunnel once it is older than the ttl, healthy or not.
+See [configuration](configuration.md#auto-close-watchdog-and-ttl).
 
 ## The floating label
 

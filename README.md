@@ -151,7 +151,7 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels up <env> <target>...` | Start only the named targets |
 | `tunnels up <env> --keepalive [SECONDS]` | Also keep the sessions from idling out. Default 300s. Off unless asked for |
 | `tunnels up <env> --terraform` | Also patch `/etc/hosts` so the real hostname resolves to `127.0.0.1`, for tools (e.g. terraform's kubernetes/helm providers) that dial the real hostname instead of using the patched kubeconfig. Needs `sudo`. Removed again on `down` |
-| `tunnels up <env> --ttl [MINUTES]` | Auto-close tunnels after this long, and sooner if a tunnel's port dies while the process lingers. Default 480m. Off unless asked for |
+| `tunnels up <env> --ttl [MINUTES]` | Also auto-close tunnels after this long, healthy or not. A dead tunnel is always cleared automatically, with or without this flag |
 | `tunnels` (no args) | Interactive picker: pick an account, then a target or `all`, and start it |
 | `tunnels status` | List live tunnels |
 | `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |

@@ -560,11 +560,9 @@ def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None)
             print("keepalive already running")
 
     minutes = ttl_minutes(block, ttl)
-    if minutes:
-        if start_watchdog(minutes):
-            print(f"auto-closes after {minutes}m, or sooner if the port dies")
-        else:
-            print("watchdog already running")
+    if start_watchdog(minutes):
+        extra = f", auto-closes after {minutes}m" if minutes else ""
+        print(f"watchdog clears dead tunnels automatically{extra}")
     return 0
 
 
@@ -713,18 +711,20 @@ def ttl_minutes(block, flag):
     return WATCHDOG_DEFAULT_MINUTES if value is True else int(value)
 
 
-def start_watchdog(minutes):
+def start_watchdog(minutes=None):
     """One detached process watches every tunnel, like keepalive does.
 
-    Unlike keepalive it also force-closes a tunnel whose local port has
-    stopped accepting connections (the session died on the AWS side but
-    the local process is still hanging around), regardless of ttl.
+    Started automatically on every `up`, no flag needed: it always
+    force-closes a tunnel whose local port has stopped accepting
+    connections (the session died on the AWS side but the local process
+    is still hanging around). A ttl on top of that is opt-in; `minutes`
+    of None or 0 means no ttl, dead-port checking only.
     """
     if watchdog_running():
         return False
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
-        [sys.executable, "-m", "tunnels_cli.watchdog", str(minutes)],
+        [sys.executable, "-m", "tunnels_cli.watchdog", str(minutes or 0)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL, start_new_session=True,
     )
@@ -1137,9 +1137,9 @@ def main(argv=None):
     up.add_argument(
         "--ttl", nargs="?", type=int, const=WATCHDOG_DEFAULT_MINUTES, default=None,
         metavar="MINUTES",
-        help=f"auto-close tunnels after this many minutes, and sooner if a "
-             f"tunnel's port dies while the process lingers (default "
-             f"{WATCHDOG_DEFAULT_MINUTES}m). Off unless asked for",
+        help=f"also auto-close tunnels after this many minutes, healthy or "
+             f"not (default {WATCHDOG_DEFAULT_MINUTES}m). A dead tunnel is "
+             f"always cleared automatically, with or without this flag",
     )
 
     down = sub.add_parser("down", help="stop tunnels")

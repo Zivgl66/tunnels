@@ -53,10 +53,10 @@ def run(ttl_minutes, interval=CHECK_INTERVAL):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    ttl_minutes = int(argv[0]) if argv else cli.WATCHDOG_DEFAULT_MINUTES
+    ttl_minutes = int(argv[0]) if argv else 0
     cli.WATCHDOG_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
-        return run(ttl_minutes)
+        return run(ttl_minutes or None)
     finally:
         cli.WATCHDOG_PID_FILE.unlink(missing_ok=True)
 
