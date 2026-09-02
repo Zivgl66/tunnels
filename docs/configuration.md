@@ -11,6 +11,7 @@ dev:                                    # tunnels up dev
   jump: "tag:Name=shared-bastion"           # default jump for the targets below
   hud: true
   keepalive: 300                            # optional, see "Idle timeouts" below
+  ttl: 480                                  # optional, minutes before auto-close
   targets:
     platform:
       eks: platform-cluster                 # an EKS target
@@ -32,6 +33,7 @@ dev:                                    # tunnels up dev
 | `jump` | block or target | yes, in one of the two | Instance id (`i-0abc...`) or tag lookup (`tag:Key=Value`) |
 | `hud` | block | no | `true` starts the floating label with the tunnels |
 | `keepalive` | block | no | Seconds between pokes, or `true` for 300. Omit it and keepalive stays off |
+| `ttl` | block | no | Minutes before a tunnel auto-closes, or `true` for 480. Omit it and ttl stays off |
 | `targets` | block | yes | One entry per cluster or host |
 | `eks` | target | one of the two | EKS cluster name. The endpoint is looked up |
 | `host` + `port` | target | one of the two | Any host the jump can reach |
@@ -103,8 +105,11 @@ An existing block with the same name is never overwritten.
 
 ## Idle timeouts
 
-`tunnels` sets no timeout of its own. A tunnel lives until AWS ends it, you
-run `tunnels down`, or the laptop sleeps.
+By default `tunnels` sets no wall-clock timeout of its own. A healthy tunnel
+lives until AWS ends it or you run `tunnels down` — unless you opt into
+`--ttl` (below), which closes it after a fixed time regardless. A tunnel
+whose local port has already died is always cleared automatically; see
+[auto-close](#auto-close-watchdog-and-ttl).
 
 AWS ends it on two account-wide Session Manager settings, both in the
 `SSM-SessionManagerRunShell` document:
@@ -141,3 +146,25 @@ and exits by itself once the last tunnel is gone.
 Pick an interval below `idleSessionTimeout`, with room to spare: 300 seconds
 against the 20 minute default. It does not defeat `maxSessionDuration`, which
 ignores activity.
+
+## Auto-close (watchdog and ttl)
+
+A tunnel's local process does not always exit when the AWS side of the
+session ends — it can hang around holding the port with nothing behind it.
+Every `up` starts one detached watchdog process (like keepalive's) that
+checks every live tunnel once a minute and stops it the moment its local
+port stops accepting connections. It stops a tunnel the same way
+`tunnels down` does: kills the process group, closes the AWS session,
+undoes any `--terraform` `/etc/hosts` patch. **This always runs, no flag
+needed** — it never touches a healthy tunnel.
+
+`--ttl` adds a second, opt-in check on top: the same watchdog also stops a
+tunnel once it is older than the ttl, healthy or not.
+
+```bash
+tunnels up dev --ttl              # also auto-close after 480 minutes
+tunnels up dev --ttl 60           # also auto-close after 60 minutes
+```
+
+Or set `ttl` on the block. The flag wins over the config, same as keepalive.
+Omit both and only the always-on dead-port check applies.

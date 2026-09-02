@@ -582,6 +582,122 @@ def test_keepalive_run_exits_when_no_tunnels_are_left(tmp_path, monkeypatch):
     assert keepalive.run(interval=0) == 0
 
 
+def test_ttl_minutes_flag_wins_over_the_config():
+    assert tunnels.ttl_minutes({"ttl": 60}, 15) == 15
+
+
+def test_ttl_minutes_reads_the_config_when_there_is_no_flag():
+    assert tunnels.ttl_minutes({"ttl": 60}, None) == 60
+    assert tunnels.ttl_minutes({"ttl": True}, None) == tunnels.WATCHDOG_DEFAULT_MINUTES
+
+
+def test_ttl_minutes_is_off_by_default():
+    assert tunnels.ttl_minutes({}, None) is None
+    assert tunnels.ttl_minutes({"ttl": False}, None) is None
+
+
+def test_watchdog_port_dead_detects_a_closed_port():
+    from tunnels_cli import watchdog
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        assert watchdog.port_dead(port) is False
+    assert watchdog.port_dead(port) is True
+
+
+def _spawn_sleeper():
+    import subprocess as sp
+
+    proc = sp.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    return proc
+
+
+def _entry(key="dev/argo", pid=None, local_port=0, started=None, hosts_entry=False):
+    import time as t
+
+    return {
+        "key": key, "config": "dev", "target": "argo", "pid": pid,
+        "local_port": local_port, "remote_host": "cluster.example.com",
+        "remote_port": 443, "profile": "p", "region": "r", "account": "111",
+        "jump": "i-abc", "cluster": None, "context": None,
+        "session_id": None, "started": t.time() if started is None else started,
+        "hosts_entry": hosts_entry,
+    }
+
+
+def test_watchdog_sweep_stops_an_entry_whose_port_has_died(tmp_path, monkeypatch):
+    from tunnels_cli import watchdog
+
+    proc = _spawn_sleeper()
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    tunnels.save_state([_entry(pid=proc.pid, local_port=dead_port)])
+
+    try:
+        stopped = watchdog.sweep(ttl_seconds=None)
+        assert stopped == 1
+        assert tunnels.load_state() == []
+        # The parent lingers as a zombie until reaped below, so check the
+        # process group (pgrep skips zombies), not the pid.
+        assert tunnels.group_alive(proc.pid) is False
+    finally:
+        proc.wait()
+
+
+def test_watchdog_sweep_stops_an_entry_past_its_ttl(tmp_path, monkeypatch):
+    from tunnels_cli import watchdog
+
+    proc = _spawn_sleeper()
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        tunnels.save_state([_entry(pid=proc.pid, local_port=port, started=0)])
+
+        try:
+            stopped = watchdog.sweep(ttl_seconds=60)
+            assert stopped == 1
+            assert tunnels.load_state() == []
+        finally:
+            proc.wait()
+
+
+def test_watchdog_sweep_leaves_a_healthy_entry_within_ttl(tmp_path, monkeypatch):
+    from tunnels_cli import watchdog
+    import time as t
+
+    proc = _spawn_sleeper()
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        tunnels.save_state([_entry(pid=proc.pid, local_port=port, started=t.time())])
+
+        try:
+            stopped = watchdog.sweep(ttl_seconds=3600)
+            assert stopped == 0
+            assert len(tunnels.load_state()) == 1
+        finally:
+            tunnels.terminate(proc.pid)
+            proc.wait()
+
+
+def test_watchdog_run_exits_when_no_tunnels_are_left(tmp_path, monkeypatch):
+    from tunnels_cli import watchdog
+
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    assert watchdog.run(ttl_minutes=5, interval=0) == 0
+
+
 def _logo_arcs():
     """Radius and stroke width of each arc in the logo, outermost first."""
     import re
