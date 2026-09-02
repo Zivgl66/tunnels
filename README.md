@@ -29,7 +29,9 @@ command per environment.**
   database in that block at once, and skips the ones already running.
 - **kubectl just works** — the kubeconfig is rewritten to point at the local
   port, with `tls-server-name` so the certificate still checks out. No
-  `/etc/hosts`, no `sudo`.
+  `/etc/hosts`, no `sudo`. Tools that dial the real hostname directly (like
+  terraform's kubernetes/helm providers) can opt into `/etc/hosts` patching
+  with `--terraform`.
 - **no daemon** — each tunnel is a plain `aws ssm start-session` process,
   tracked in a state file that every command prunes. Nothing to babysit.
 - **the jump host can be replaced** — look it up by tag, not by instance id, so
@@ -143,6 +145,7 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels up <env>` | Start every target in that config block |
 | `tunnels up <env> <target>...` | Start only the named targets |
 | `tunnels up <env> --keepalive [SECONDS]` | Also keep the sessions from idling out. Default 300s. Off unless asked for |
+| `tunnels up <env> --terraform` | Also patch `/etc/hosts` so the real hostname resolves to `127.0.0.1`, for tools (e.g. terraform's kubernetes/helm providers) that dial the real hostname instead of using the patched kubeconfig. Needs `sudo`. Removed again on `down` |
 | `tunnels` (no args) | Interactive picker: pick an account, then a target or `all`, and start it |
 | `tunnels status` | List live tunnels |
 | `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |
