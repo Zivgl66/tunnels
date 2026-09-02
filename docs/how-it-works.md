@@ -13,7 +13,10 @@ tls-server-name: EXAMPLE1234ABCD.gr7.eu-west-1.eks.amazonaws.com
 
 `tls-server-name` makes `kubectl` send the real cluster hostname during the TLS
 handshake while it connects to localhost. The certificate check passes. This is
-why no `/etc/hosts` entry and no `sudo` are needed.
+why no `/etc/hosts` entry and no `sudo` are needed by default. Tools that
+dial the real hostname directly instead of reading the kubeconfig (e.g.
+terraform's kubernetes/helm providers) can opt into an `/etc/hosts` patch
+with `--terraform` — see below.
 
 Live tunnels are tracked in `~/.tunnels/state.json`. Every command drops dead
 processes from that file first, so there is no daemon to babysit. Session
@@ -30,8 +33,22 @@ read from the plugin's own log output when the tunnel starts.
 
 `down` does not touch two things. Your kubectl context is left in place: a
 stale one fails loudly on a dead port, which is clearer than a context that
-quietly disappears, and the next `up` repairs it. `/etc/hosts` is never
-involved at all, because `tls-server-name` does that job.
+quietly disappears, and the next `up` repairs it. `/etc/hosts` is not
+involved by default, because `tls-server-name` does that job.
+
+## Terraform / hostname-dialing tools
+
+Some tools hardcode the cluster's real DNS name in their host config instead
+of reading the kubeconfig this tool patches — terraform's kubernetes/helm
+providers, among others. `tunnels up <env> [target] --terraform` adds a
+tagged `/etc/hosts` line (`127.0.0.1 <hostname> # tunnels:<key>`) pointing
+that hostname at `127.0.0.1`; `tunnels down` removes it again. This needs
+`sudo`, so expect a password prompt.
+
+`/etc/hosts` has no notion of port, so this only gets you halfway there: the
+caller still has to point its own port config (e.g. terraform's
+`kubeapi_port` variable) at the tunnel's `local_port` for the connection to
+land anywhere.
 
 ## Keepalive
 

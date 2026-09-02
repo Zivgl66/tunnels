@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 import yaml
@@ -1053,6 +1054,10 @@ def cmd_profiles():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tunnels")
+    parser.add_argument(
+        "--version", action="version",
+        version=f"tunnels {pkg_version('tunnels-cli')}",
+    )
     sub = parser.add_subparsers(dest="command")
 
     up = sub.add_parser("up", help="start tunnels for a config")
