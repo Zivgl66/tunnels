@@ -93,6 +93,11 @@ prints the path on its own, so you can pipe it somewhere.
 Behind a TLS-inspecting proxy, put `UV_NATIVE_TLS=1` in front of the command so
 the installer trusts your system certificates.
 
+`tunnels --version` prints the installed version. Since install pulls `main`
+with no tag pin, `pipx upgrade tunnels-cli` gets you the latest commit, not
+necessarily the latest tagged release — compare against the
+[Releases page](https://github.com/Zivgl66/tunnels/releases) if that matters.
+
 The tool itself is about 50 KB. The virtualenv comes to roughly 31 MB, and
 26 MB of that is `pyobjc`, which draws the floating label.
 
