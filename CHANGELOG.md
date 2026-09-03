@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-03
+
 ### Added
 - Coloured output across every command, a banner on the interactive picker
   pairing an ASCII drawing of the logo's nested arches with the wordmark
