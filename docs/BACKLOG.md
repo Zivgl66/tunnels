@@ -4,7 +4,8 @@ Ideas that were considered and deliberately left out of the first version.
 Each one names why it is not built yet, so a later decision has the reasoning.
 
 Shipped so far: `up`, `down`, `status`, `init`, `discover`, `doctor`, `hud`,
-sticky ports, per-target jump hosts, AWS-side session cleanup.
+`logs`, sticky ports, per-target jump hosts, AWS-side session cleanup,
+coloured output.
 
 ## Worth doing next
 
@@ -31,14 +32,10 @@ where its clusters live, and the wrong one fails with `AccessDenied` on
 Try the profile's region first, then scan a short list of likely regions, and
 show what was found where.
 
-### 3. `tunnels logs <env> <target>`
-Tail `~/.tunnels/logs/<env>-<target>.log`. Two lines of code. Only useful while
-debugging a jump host, so it has not earned its place yet.
-
-### 4. Several environments in one command
+### 3. Several environments in one command
 `tunnels up dev prd`. Straightforward, just not needed yet.
 
-### 5. Shell completion
+### 4. Shell completion
 Complete environment and target names from the config. Pleasant, not important.
 
 ## Considered and rejected

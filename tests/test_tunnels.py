@@ -1,6 +1,7 @@
 """Unit tests for the pure helpers in `tunnels`. No AWS, no network."""
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -852,7 +853,7 @@ def test_cmd_interactive_picks_account_then_all_targets(monkeypatch):
     calls = []
     monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
     picks = iter(["dev", "all"])
-    monkeypatch.setattr(tunnels, "menu", lambda title, options: next(picks))
+    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
     monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
 
     result = tunnels.cmd_interactive()
@@ -865,7 +866,7 @@ def test_cmd_interactive_picks_account_then_one_target(monkeypatch):
     calls = []
     monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
     picks = iter(["dev", "db"])
-    monkeypatch.setattr(tunnels, "menu", lambda title, options: next(picks))
+    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
     monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
 
     tunnels.cmd_interactive()
@@ -875,18 +876,18 @@ def test_cmd_interactive_picks_account_then_one_target(monkeypatch):
 
 def test_cmd_interactive_cancel_at_account_step_returns_zero(monkeypatch):
     monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "menu", lambda title, options: None)
+    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: None)
     monkeypatch.setattr(tunnels, "cmd_up", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
 
     assert tunnels.cmd_interactive() == 0
 
 
-def test_cmd_interactive_cancel_at_target_step_goes_back_to_account_step(monkeypatch):
+def test_cmd_interactive_back_at_target_step_returns_to_account_step(monkeypatch):
     calls = []
     monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    # account, target(cancel), account again, target
-    picks = iter(["dev", None, "dev", "db"])
-    monkeypatch.setattr(tunnels, "menu", lambda title, options: next(picks))
+    # account, target(back), account again, target
+    picks = iter(["dev", tunnels.menu_back, "dev", "db"])
+    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
     monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
 
     result = tunnels.cmd_interactive()
@@ -942,3 +943,140 @@ def test_bump_version_minor_resets_patch():
 def test_bump_version_major_resets_minor_and_patch():
     release = _release()
     assert release.bump_version("1.2.3", "major") == "2.0.0"
+
+
+# ---------------------------------------------------------------------------
+# ui
+# ---------------------------------------------------------------------------
+
+from tunnels_cli import ui  # noqa: E402
+
+
+def _strip_ansi(text):
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def test_paint_is_a_no_op_when_color_is_off():
+    ui.set_color(False)
+    assert ui.paint("hello", "red", "bold") == "hello"
+
+
+def test_paint_wraps_in_ansi_when_color_is_on():
+    ui.set_color(True)
+    assert ui.paint("hi", "red") == "\033[31mhi\033[0m"
+    ui.set_color(False)
+
+
+def test_no_color_env_disables_color(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert ui.supports_color() is False
+
+
+def test_human_age_reads_short_at_every_scale():
+    assert ui.human_age(9) == "9s"
+    assert ui.human_age(65) == "1m05s"
+    assert ui.human_age(3700) == "1h01m"
+
+
+def test_table_aligns_columns_ignoring_color_codes():
+    ui.set_color(True)
+    rendered = ui.table(["A", "B"], [[ui.paint("xx", "red"), "1"], ["y", "2"]])
+    ui.set_color(False)
+    plain = [_strip_ansi(line) for line in rendered.splitlines()]
+    # the coloured cell is padded on visible width, so both rows line up
+    assert plain[2] == "  xx  1"
+    assert plain[3] == "  y   2"
+
+
+def test_banner_contains_block_letters():
+    ui.set_color(False)
+    assert "\\__|" in ui.banner()
+
+
+def test_spinner_is_silent_without_a_tty(capsys):
+    ui.set_color(False)
+    with ui.Spinner("working"):
+        pass
+    assert "working" in capsys.readouterr().out
+
+
+def test_status_subcommand_reaches_cmd_status(monkeypatch):
+    """It fell through to the interactive picker once. Never again."""
+    called = []
+    monkeypatch.setattr(tunnels, "cmd_status", lambda: called.append(True) or 0)
+    monkeypatch.setattr(tunnels, "cmd_interactive", lambda: pytest.fail("picker"))
+    assert tunnels.main(["status"]) == 0
+    assert called == [True]
+
+
+def test_cmd_up_keeps_going_when_one_target_fails(tmp_path, monkeypatch, capsys):
+    """A broken target must not cost you the working ones."""
+    config = {
+        "dev": {
+            "profile": "p", "region": "r", "jump": "i-0",
+            "targets": {"good": {"eks": "c1"}, "bad": {"eks": "c2"}},
+        }
+    }
+    started = []
+    monkeypatch.setattr(tunnels, "load_config", lambda: config)
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(tunnels, "ensure_sso", lambda profile, region: "1234")
+    monkeypatch.setattr(tunnels, "start_hud", lambda: None)
+    monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
+
+    def fake_start(config_name, name, target, *args, **kwargs):
+        if name == "bad":
+            raise tunnels.TunnelError("no running instance with that tag")
+        started.append(name)
+
+    monkeypatch.setattr(tunnels, "start_target", fake_start)
+
+    assert tunnels.cmd_up("dev", []) == 1        # a failure is still an error
+    assert started == ["good"]                   # ...but 'good' came up first
+    out = capsys.readouterr().out
+    assert "no running instance" in out
+    assert "1 of 2 target(s) failed: bad" in out
+
+
+def test_banner_falls_back_to_letters_only_when_narrow(monkeypatch):
+    ui.set_color(False)
+    monkeypatch.setattr(ui, "width", lambda default=80: 40)
+    narrow = ui.banner("subtitle")
+    assert "\\__|" in narrow                       # the wordmark is still there
+    assert "█" not in narrow                  # the logo is not
+
+
+def test_menu_back_key_returns_the_back_sentinel():
+    from tunnels_cli.menu import BACK
+
+    keys = iter(["\x1b[D"])
+    result = menu("Pick one", ["alpha"], read_key=lambda: next(keys),
+                  allow_back=True)
+    assert result is BACK
+
+
+def test_menu_q_goes_back_when_there_is_a_level_to_go_back_to():
+    from tunnels_cli.menu import BACK
+
+    keys = iter(["q"])
+    assert menu("Pick one", ["alpha"], read_key=lambda: next(keys),
+                allow_back=True) is BACK
+    # without allow_back, q still cancels outright
+    keys = iter(["q"])
+    assert menu("Pick one", ["alpha"], read_key=lambda: next(keys)) is None
+
+
+def test_menu_ctrl_c_quits_even_when_back_is_offered():
+    keys = iter(["\x03"])
+    assert menu("Pick one", ["alpha"], read_key=lambda: next(keys),
+                allow_back=True) is None
+
+
+def test_cmd_interactive_ctrl_c_at_target_step_stops(monkeypatch):
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    picks = iter(["dev", None])
+    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
+    monkeypatch.setattr(tunnels, "cmd_up",
+                        lambda *a, **k: pytest.fail("should not start a tunnel"))
+
+    assert tunnels.cmd_interactive() == 0

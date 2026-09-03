@@ -152,8 +152,8 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels up <env> --keepalive [SECONDS]` | Also keep the sessions from idling out. Default 300s. Off unless asked for |
 | `tunnels up <env> --terraform` | Also patch `/etc/hosts` so the real hostname resolves to `127.0.0.1`, for tools (e.g. terraform's kubernetes/helm providers) that dial the real hostname instead of using the patched kubeconfig. Needs `sudo`. Removed again on `down` |
 | `tunnels up <env> --ttl [MINUTES]` | Also auto-close tunnels after this long, healthy or not. A dead tunnel is always cleared automatically, with or without this flag |
-| `tunnels` (no args) | Interactive picker: pick an account, then a target or `all`, and start it |
-| `tunnels status` | List live tunnels |
+| `tunnels` (no args) | Interactive picker: pick an account, then a target or `all`, and start it. `←`/`b`/`q` step back to the account list, ctrl-c quits |
+| `tunnels status` | List live tunnels, with a health dot per tunnel |
 | `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |
 | `tunnels down all` | Stop everything |
 | `tunnels hud` | Turn the floating label on or off |
@@ -161,9 +161,14 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels config` | Open the existing config file. `--path` prints the path only |
 | `tunnels discover <profile>` | Build a config block by asking the account what it has |
 | `tunnels doctor` | Find leftover tunnels and AWS sessions. `--fix` cleans them up |
+| `tunnels logs <env> <target>` | Tail that tunnel's session log. `-f` follows it |
 
 `up` skips targets that are already running, so it is safe to repeat after you
 add a new one.
+
+Output is coloured when a terminal is attached. It turns itself off when the
+output is piped or redirected, and `--no-color` (or `NO_COLOR=1`) forces plain
+text.
 
 ## Docs
 
