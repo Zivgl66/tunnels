@@ -6,6 +6,32 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Coloured output across every command, a banner on the interactive picker
+  pairing an ASCII drawing of the logo's nested arches with the wordmark
+  (letters only on a narrow or non-UTF8 terminal), spinners for the slow AWS calls, and aligned tables for `status`
+  and `profiles`. Colour turns itself off when the output is not a terminal,
+  and `--no-color` / `NO_COLOR=1` forces plain text. Breaking: no.
+- `tunnels status` now shows a per-tunnel health dot (green while the local
+  port answers, red when it has stopped), plus the kubectl context and a
+  readable age. Breaking: no.
+- `tunnels logs <env> <target> [-f]` tails a tunnel's session log.
+  Breaking: no.
+- The picker marks targets that are already up, and `g` / `G` jump to the
+  first and last entry. Breaking: no.
+- The target step of the picker can be left again: `←`, `b`, `h` or `q` step
+  back to the account list, and the hint line says so. Ctrl-C still quits
+  outright from any level. Breaking: no.
+
+### Fixed
+- `tunnels status` ran the interactive picker instead of printing the status
+  table: the subcommand was never dispatched. Breaking: no.
+- `up` no longer stops at the first target it cannot start. Every other target
+  in the block still comes up, the failures are listed together at the end,
+  and the exit code is 1. Breaking: no.
+- A warning raised during a spinner (for example "15 instances match this
+  tag") no longer prints on top of the spinner's own line.
+
 ## [0.6.0] - 2026-09-02
 
 ### Added

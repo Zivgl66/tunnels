@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 
+from tunnels_cli import ui
+from tunnels_cli.menu import BACK as menu_back
 from tunnels_cli.menu import menu
 
 STATE_DIR = Path.home() / ".tunnels"
@@ -24,6 +26,13 @@ CONFIG_PATHS = [
     Path.home() / ".config" / "tunnels" / "config.yaml",
     Path.cwd() / "config.yaml",
 ]
+
+
+def _version():
+    try:
+        return pkg_version("tunnels-cli")
+    except Exception:      # running from a checkout without an install
+        return "dev"
 
 
 class TunnelError(Exception):
@@ -337,7 +346,7 @@ def resolve_jump(profile, region, jump):
             f"SSM agent for profile '{profile}'"
         )
     if len(ids) > 1:
-        print(f"warning: {len(ids)} instances match {key}={value}. Using {ids[0]}.")
+        ui.warn(f"{len(ids)} instances match {key}={value}. Using {ids[0]}.")
     return ids[0]
 
 
@@ -460,94 +469,123 @@ def remove_hosts_entry(key):
         raise TunnelError(f"could not remove /etc/hosts entry: {result.stderr.strip()}")
 
 
+def start_target(config_name, name, target, block, account, jump_cache,
+                 entries, terraform):
+    """Bring one target up and record it. Raises TunnelError if it cannot."""
+    profile, region = block["profile"], block["region"]
+    key = f"{config_name}/{name}"
+    label = ui.paint(name, "bright_cyan", "bold")
+
+    jump = jump_for(block, name, target)
+    if jump not in jump_cache:
+        with ui.Spinner(f"{name}: finding jump host {jump}"):
+            jump_cache[jump] = resolve_jump(profile, region, jump)
+    instance_id = jump_cache[jump]
+
+    if "eks" in target:
+        with ui.Spinner(f"{name}: resolving cluster {target['eks']}"):
+            host, port = eks_endpoint(profile, region, target["eks"]), 443
+    else:
+        host, port = target["host"], int(target["port"])
+
+    local_port = pick_port(target.get("local_port"), key=key)
+    wanted = target.get("local_port")
+    if wanted and local_port != wanted:
+        holder = port_holder(wanted)
+        ui.warn(f"{name}: port {wanted} is busy"
+                + (f" ({holder})" if holder else "")
+                + f", using {local_port} instead")
+
+    log_path = LOG_DIR / f"{config_name}-{name}.log"
+    pid = start_session(profile, region, instance_id, host, port,
+                        local_port, log_path)
+
+    with ui.Spinner(f"{name}: waiting for port {local_port}"):
+        opened = wait_for_port(local_port)
+    if not opened:
+        terminate(pid)
+        tail = log_path.read_text().strip().splitlines()[-5:]
+        raise TunnelError(
+            f"{name}: port {local_port} never opened.\n  " + "\n  ".join(tail)
+        )
+
+    entry = {
+        "key": key, "config": config_name, "target": name, "pid": pid,
+        "local_port": local_port, "remote_host": host, "remote_port": port,
+        "profile": profile, "region": region, "account": account,
+        "jump": instance_id,
+        "cluster": target.get("eks"), "context": None,
+        "session_id": session_id_from_log(log_path),
+        "started": time.time(),
+    }
+
+    if terraform:
+        add_hosts_entry(host, key)
+        entry["hosts_entry"] = True
+
+    if "eks" in target:
+        alias = f"tunnels-{config_name}-{name}"
+        update_kubeconfig(profile, region, target["eks"], alias)
+        write_kubeconfig_patch(alias, local_port, host)
+        entry["context"] = alias
+        ui.ok(f"{label} {ui.paint(':' + str(local_port), 'green', 'bold')} "
+              f"{ui.paint(ui.sym.dot, 'grey')} via {instance_id} "
+              f"{ui.paint(ui.sym.dot, 'grey')} context "
+              f"{ui.paint(alias, 'magenta')}")
+    else:
+        ui.ok(f"{label} {ui.paint(':' + str(local_port), 'green', 'bold')} "
+              f"{ui.paint(ui.sym.arrow, 'grey')} {host}:{port} "
+              f"{ui.paint(ui.sym.dot, 'grey')} via {instance_id}")
+
+    if terraform:
+        ui.ok(f"{label} /etc/hosts {host} {ui.sym.arrow} 127.0.0.1 "
+              f"(point terraform's port var at {local_port})")
+
+    entries.append(entry)
+    save_state(entries)
+    remember_port(key, local_port)
+
+
 def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None):
     config = load_config()
     block = config_block(config, config_name)
     targets = select_targets(block, target_names)
     profile, region = block["profile"], block["region"]
 
-    account = ensure_sso(profile, region)
-    print(f"account {account}")
+    print(ui.rule(f"up {ui.paint(config_name, 'bold')}"))
+    with ui.Spinner(f"checking credentials for {profile}"):
+        account = ensure_sso(profile, region)
+    ui.ok(f"account {ui.paint(account, 'bold')} "
+          f"{ui.paint(ui.sym.dot, 'grey')} {profile} {ui.paint(ui.sym.dot, 'grey')} {region}")
 
     jump_cache = {}
     entries = live_state()
     running = {e["key"] for e in entries}
+    failures = []
 
     for name, target in sorted(targets.items()):
         key = f"{config_name}/{name}"
+        label = ui.paint(name, "bright_cyan", "bold")
         if key in running:
-            print(f"  {name}: already up, skipping")
+            ui.step(f"{label} already up, skipping")
             if terraform:
                 existing = next(e for e in entries if e["key"] == key)
                 add_hosts_entry(existing["remote_host"], key)
                 existing["hosts_entry"] = True
                 save_state(entries)
-                print(f"  {name}: /etc/hosts patched, {existing['remote_host']} -> "
-                      f"127.0.0.1. Point terraform's port var at "
-                      f"{existing['local_port']}.")
+                ui.ok(f"{label} /etc/hosts {existing['remote_host']} "
+                      f"{ui.sym.arrow} 127.0.0.1 "
+                      f"(point terraform's port var at {existing['local_port']})")
             continue
 
-        jump = jump_for(block, name, target)
-        if jump not in jump_cache:
-            jump_cache[jump] = resolve_jump(profile, region, jump)
-        instance_id = jump_cache[jump]
-
-        if "eks" in target:
-            host, port = eks_endpoint(profile, region, target["eks"]), 443
-        else:
-            host, port = target["host"], int(target["port"])
-
-        local_port = pick_port(target.get("local_port"), key=key)
-        wanted = target.get("local_port")
-        if wanted and local_port != wanted:
-            holder = port_holder(wanted)
-            print(f"  {name}: port {wanted} is busy"
-                  + (f" ({holder})" if holder else "")
-                  + f", using {local_port} instead")
-
-        log_path = LOG_DIR / f"{config_name}-{name}.log"
-        pid = start_session(profile, region, instance_id, host, port,
-                            local_port, log_path)
-
-        if not wait_for_port(local_port):
-            terminate(pid)
-            tail = log_path.read_text().strip().splitlines()[-5:]
-            raise TunnelError(
-                f"{name}: port {local_port} never opened.\n  " + "\n  ".join(tail)
-            )
-
-        entry = {
-            "key": key, "config": config_name, "target": name, "pid": pid,
-            "local_port": local_port, "remote_host": host, "remote_port": port,
-            "profile": profile, "region": region, "account": account,
-            "jump": instance_id,
-            "cluster": target.get("eks"), "context": None,
-            "session_id": session_id_from_log(log_path),
-            "started": time.time(),
-        }
-
-        if terraform:
-            add_hosts_entry(host, key)
-            entry["hosts_entry"] = True
-
-        if "eks" in target:
-            alias = f"tunnels-{config_name}-{name}"
-            update_kubeconfig(profile, region, target["eks"], alias)
-            write_kubeconfig_patch(alias, local_port, host)
-            entry["context"] = alias
-            print(f"  {name}: up on {local_port} via {instance_id} "
-                  f"\u00b7 context {alias}")
-        else:
-            print(f"  {name}: up on {local_port} via {instance_id} "
-                  f"-> {host}:{port}")
-
-        if terraform:
-            print(f"  {name}: /etc/hosts patched, {host} -> 127.0.0.1. "
-                  f"Point terraform's port var at {local_port}.")
-
-        entries.append(entry)
-        save_state(entries)
-        remember_port(key, local_port)
+        # One broken target must not cost you the working ones: keep going and
+        # report every failure together at the end.
+        try:
+            start_target(config_name, name, target, block, account,
+                         jump_cache, entries, terraform)
+        except TunnelError as exc:
+            failures.append((name, str(exc)))
+            ui.fail(f"{name}: {exc}", stream=sys.stdout)
 
     if block.get("hud"):
         start_hud()
@@ -555,14 +593,22 @@ def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None)
     interval = keepalive_interval(block, keepalive)
     if interval:
         if start_keepalive(interval):
-            print(f"keepalive every {interval}s")
+            ui.info(f"  keepalive every {interval}s")
         else:
-            print("keepalive already running")
+            ui.info("  keepalive already running")
 
     minutes = ttl_minutes(block, ttl)
     if start_watchdog(minutes):
         extra = f", auto-closes after {minutes}m" if minutes else ""
-        print(f"watchdog clears dead tunnels automatically{extra}")
+        ui.info(f"  watchdog clears dead tunnels automatically{extra}")
+
+    print(ui.rule())
+    if failures:
+        names = ", ".join(name for name, _ in failures)
+        ui.warn(f"{len(failures)} of {len(targets)} target(s) failed: {names}")
+        ui.info(f"  the rest are up {ui.sym.dot} tunnels status")
+        return 1
+    ui.info(f"  next: tunnels status {ui.sym.dot} tunnels down {config_name}")
     return 0
 
 
@@ -589,16 +635,18 @@ def stop_entry(entry, reason=None):
         entry.get("profile"), entry.get("region"), entry.get("session_id")
     )
     port = entry["local_port"]
+    key = ui.paint(entry["key"], "bright_cyan", "bold")
     tag = f" ({reason})" if reason else ""
     note = "" if closed else ", aws session left to time out"
     if stopped and port_is_free(port):
-        print(f"stopped {entry['key']}{tag} (port {port} released{note})")
+        ui.ok(f"stopped {key}{tag} {ui.paint(f'(port {port} released{note})', 'grey')}")
     elif stopped:
         holder = port_holder(port)
-        print(f"stopped {entry['key']}{tag}, but port {port} is still held"
-              + (f" by {holder}" if holder else ""))
+        ui.warn(f"stopped {entry['key']}{tag}, but port {port} is still held"
+                + (f" by {holder}" if holder else ""))
     else:
-        print(f"could not stop {entry['key']}{tag} (pid {entry['pid']})")
+        ui.fail(f"could not stop {entry['key']}{tag} (pid {entry['pid']})",
+                stream=sys.stdout)
     save_state([e for e in load_state() if e["key"] != entry["key"]])
     return stopped
 
@@ -607,28 +655,41 @@ def cmd_down(config_name, target_names):
     entries = live_state()
     doomed = matching_entries(entries, config_name, target_names)
     if not doomed:
-        print("nothing to stop")
+        ui.info("nothing to stop")
         return 0
+    print(ui.rule(f"down {ui.paint(config_name, 'bold')}"))
     for entry in doomed:
         stop_entry(entry)
     return 0
 
 
+def shorten(text, limit=44):
+    """Keep the tail of a long endpoint, which is the telling part."""
+    return text if len(text) <= limit else "\u2026" + text[-(limit - 1):]
+
+
 def cmd_status():
     entries = live_state()
     if not entries:
-        print("no tunnels up")
+        ui.info(f"no tunnels up {ui.sym.dot} start one with 'tunnels up <config>'")
         return 0
-    width = max(len(e["key"]) for e in entries)
+    rows = []
     for entry in sorted(entries, key=lambda e: e["key"]):
         where = entry["cluster"] or f"{entry['remote_host']}:{entry['remote_port']}"
-        age = int(time.time() - entry["started"])
-        print(
-            f"  {entry['key']:<{width}}  :{entry['local_port']:<6} "
-            f"{entry['account']}  {where}  up {age}s"
-        )
-        if entry["context"]:
-            print(f"  {'':<{width}}  kubectl context: {entry['context']}")
+        healthy = not port_is_free(entry["local_port"])
+        rows.append([
+            ui.paint(ui.sym.up, "green" if healthy else "red"),
+            ui.paint(entry["key"], "bright_cyan", "bold"),
+            ui.paint(f":{entry['local_port']}", "green" if healthy else "grey"),
+            entry["account"],
+            shorten(where),
+            ui.paint(entry["context"], "magenta") if entry["context"]
+            else ui.paint("-", "grey"),
+            ui.paint(ui.human_age(time.time() - entry["started"]), "grey"),
+        ])
+    print(ui.rule(f"{len(rows)} tunnel(s) up"))
+    print(ui.table(["", "TUNNEL", "PORT", "ACCOUNT", "TARGET", "CONTEXT", "AGE"],
+                   rows))
     return 0
 
 
@@ -734,10 +795,12 @@ def start_watchdog(minutes=None):
 
 def cmd_interactive():
     """No subcommand given: pick an account and a target, then start it."""
+    print(ui.banner(f"AWS SSM tunnels {ui.sym.dot} v{_version()}"))
     config = load_config()
     accounts = sorted(config)
     if not accounts:
         raise TunnelError("no accounts configured. Run 'tunnels init'.")
+    live = {e["key"] for e in live_state()}
 
     while True:
         account = menu("Which account?", accounts)
@@ -746,11 +809,18 @@ def cmd_interactive():
 
         block = config_block(config, account)
         target_names = sorted(block["targets"])
-        choices = target_names + ["all"]
+        choices = [
+            f"{n} {ui.sym.up}" if f"{account}/{n}" in live else n
+            for n in target_names
+        ] + ["all"]
 
-        target = menu(f"Which target in '{account}'?", choices)
+        target = menu(f"Which target in '{account}'?", choices,
+                      allow_back=True)
+        if target is menu_back:
+            continue          # back / q: return to the account list
         if target is None:
-            continue  # q at this step goes back to the account list
+            return 0          # ctrl-c: stop here
+        target = target.replace(f" {ui.sym.up}", "")
 
         return cmd_up(account, [] if target == "all" else [target])
 
@@ -761,10 +831,10 @@ def cmd_hud():
     if pid:
         os.kill(pid, 15)
         HUD_PID_FILE.unlink(missing_ok=True)
-        print("hud stopped")
+        ui.ok("hud stopped")
         return 0
     start_hud()
-    print("hud started")
+    ui.ok("hud started")
     return 0
 
 
@@ -993,17 +1063,18 @@ def cmd_doctor(fix):
 
     plugins = running_plugins()
     strays = orphan_pids(entries, plugins)
+    print(ui.rule("doctor"))
     if strays:
         problems += len(strays)
-        print(f"{len(strays)} port forward process(es) with no tunnel behind them:")
+        ui.warn(f"{len(strays)} port forward process(es) with no tunnel behind them")
         for pid in strays:
-            print(f"    pid {pid}")
+            ui.info(f"      pid {pid}")
         if fix:
             for pid in strays:
                 terminate(pid)
-            print("    stopped")
+            ui.ok("stopped")
     else:
-        print("no stray port forward processes")
+        ui.ok("no stray port forward processes")
 
     ours = our_session_ids()
     live_ids = {e.get("session_id") for e in entries if e.get("session_id")}
@@ -1024,32 +1095,47 @@ def cmd_doctor(fix):
             capture_output=True, text=True,
         )
         if probe.returncode != 0:
-            print(f"{profile}: not logged in, skipped")
+            ui.info(f"  {profile}: not logged in, skipped")
             continue
         try:
             listed = aws(profile, region, "ssm", "describe-sessions",
                          "--state", "Active", "--query", "Sessions") or []
         except TunnelError as exc:
             reason = "no permission" if "AccessDenied" in str(exc) else "call failed"
-            print(f"{profile}: cannot list sessions ({reason}), skipped")
+            ui.warn(f"{profile}: cannot list sessions ({reason}), skipped")
             continue
         stale = orphan_sessions(listed, live_ids, ours)
         if not stale:
-            print(f"{profile}: no stale aws sessions")
+            ui.ok(f"{profile}: no stale aws sessions")
             continue
         problems += len(stale)
-        print(f"{profile}: {len(stale)} aws session(s) still open with no tunnel:")
+        ui.warn(f"{profile}: {len(stale)} aws session(s) still open with no tunnel")
         for session in stale:
-            print(f"    {session['SessionId']}  target {session.get('Target')}")
+            ui.info(f"      {session['SessionId']}  target {session.get('Target')}")
         if fix:
             for session in stale:
                 terminate_session(profile, region, session["SessionId"])
-            print("    terminated")
+            ui.ok("terminated")
 
+    print(ui.rule())
     if problems and not fix:
-        print("\nRun 'tunnels doctor --fix' to clean these up.")
+        ui.info("  run 'tunnels doctor --fix' to clean these up")
     elif not problems:
-        print("\nnothing to clean up")
+        ui.ok("nothing to clean up")
+    return 0
+
+
+def cmd_logs(config_name, target, follow):
+    """Tail the session log for one tunnel, for when a jump host misbehaves."""
+    path = LOG_DIR / f"{config_name}-{target}.log"
+    if not path.is_file():
+        raise TunnelError(f"no log at {path}. Has '{config_name}/{target}' been up?")
+    ui.info(f"{path}")
+    cmd = ["tail", "-f", str(path)] if follow else ["tail", "-n", "50", str(path)]
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -1064,11 +1150,14 @@ def cmd_init():
         target.write_text(example.read_text())
         print(f"wrote {target}")
 
-    print("\nFill in these, one block per environment:")
-    print("  profile     an SSO profile from ~/.aws/config")
-    print("  region      the account's region")
-    print("  jump        Name tag of the SSM-registered jump host, or an i-... id")
-    print("  eks         the EKS cluster name (or use host + port for a database)")
+    print(ui.rule("fill in these, one block per environment"))
+    for key, what in (
+        ("profile", "an SSO profile from ~/.aws/config"),
+        ("region", "the account's region"),
+        ("jump", "Name tag of the SSM-registered jump host, or an i-... id"),
+        ("eks", "the EKS cluster name (or host + port for a database)"),
+    ):
+        print(f"  {ui.paint(key.ljust(9), 'bright_cyan')} {ui.paint(what, 'grey')}")
 
     if open_in_editor(target):
         print(f"\nopened {target}")
@@ -1099,25 +1188,51 @@ def cmd_profiles():
     """List the accounts configured, with their AWS profile and targets."""
     config = load_config()
     if not config:
-        print("no accounts configured. Run 'tunnels init'.")
+        ui.info("no accounts configured. Run 'tunnels init'.")
         return 0
-    width = max(len(name) for name in config)
+    rows = []
     for name in sorted(config):
         block = config[name]
-        profile = block.get("profile", "?")
-        region = block.get("region", "?")
-        targets = ", ".join(sorted(block.get("targets", {})))
-        print(f"  {name:<{width}}  {profile}  {region}  {targets}")
+        rows.append([
+            ui.paint(name, "bright_cyan", "bold"),
+            block.get("profile", "?"),
+            block.get("region", "?"),
+            ui.paint(", ".join(sorted(block.get("targets", {}))), "grey"),
+        ])
+    print(ui.rule(f"{len(rows)} config(s)"))
+    print(ui.table(["CONFIG", "PROFILE", "REGION", "TARGETS"], rows))
     return 0
 
 
+EPILOG = """examples:
+  tunnels                      pick an account and a target from a menu
+  tunnels up dev               start every target in the 'dev' block
+  tunnels up dev api db        start named targets only
+  tunnels status               what is up right now
+  tunnels logs dev api -f      follow one tunnel's session log
+  tunnels down all             stop everything
+
+colour: off automatically when piped, or with --no-color / NO_COLOR=1
+"""
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="tunnels")
+    parser = argparse.ArgumentParser(
+        prog="tunnels",
+        description="Open AWS SSM port forward tunnels to private clusters "
+                    "and databases through a jump host.",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--version", action="version",
-        version=f"tunnels {pkg_version('tunnels-cli')}",
+        version=f"tunnels {_version()}",
     )
-    sub = parser.add_subparsers(dest="command")
+    parser.add_argument(
+        "--no-color", action="store_true",
+        help="plain output, no ANSI colour",
+    )
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     up = sub.add_parser("up", help="start tunnels for a config")
     up.add_argument("config")
@@ -1162,16 +1277,28 @@ def main(argv=None):
     disc.add_argument("--name", help="config block name, defaults to the profile")
     sub.add_parser("hud", help="toggle the floating label")
 
+    logs = sub.add_parser("logs", help="tail a tunnel's session log")
+    logs.add_argument("config")
+    logs.add_argument("target")
+    logs.add_argument("-f", "--follow", action="store_true",
+                      help="keep printing new lines")
+
     args = parser.parse_args(argv)
+    if args.no_color:
+        ui.set_color(False)
     try:
         if args.command == "up":
             return cmd_up(args.config, args.targets, args.keepalive, args.terraform, args.ttl)
         if args.command == "down":
             return cmd_down(args.config, args.targets)
+        if args.command == "status":
+            return cmd_status()
         if args.command == "profiles":
             return cmd_profiles()
         if args.command == "hud":
             return cmd_hud()
+        if args.command == "logs":
+            return cmd_logs(args.config, args.target, args.follow)
         if args.command == "config":
             return cmd_config(args.path)
         if args.command == "init":
@@ -1183,8 +1310,12 @@ def main(argv=None):
             return cmd_discover(args.profile, region, args.name or args.profile)
         return cmd_interactive()
     except TunnelError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        ui.fail(str(exc))
         return 1
+    except KeyboardInterrupt:
+        print()
+        ui.info("cancelled")
+        return 130
 
 
 def app():
