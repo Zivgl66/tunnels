@@ -6,6 +6,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- The floating HUD label fades to low opacity while the cursor hovers it,
+  so it no longer blocks the view of what is underneath. Breaking: no.
+
 ## [0.7.0] - 2026-09-03
 
 ### Added
