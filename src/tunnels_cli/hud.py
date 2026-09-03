@@ -18,12 +18,14 @@ from pathlib import Path
 
 import objc
 from Cocoa import (
+    NSAnimationContext,
     NSApplication,
     NSApplicationActivationPolicyAccessory,
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
     NSAttributedString,
+    NSEvent,
     NSFont,
     NSFontAttributeName,
     NSMakeRect,
@@ -51,6 +53,10 @@ MARK = 20            # the logo, drawn at this many points square
 MARK_GAP = 8         # space between the logo and the tunnel rows
 
 DEAD = (0.55, 0.57, 0.60)       # a dropped session: grey, not shouting
+
+HOVER_ALPHA = 0.20      # panel opacity while the cursor sits over it
+HOVER_POLL_SECONDS = 0.1
+HOVER_FADE_SECONDS = 0.25
 
 # The logo: four arcs receding, outermost first. Radii and widths are the
 # same ratios as assets/logo.svg, expressed as a fraction of MARK so the
@@ -275,6 +281,24 @@ class Hud(NSObject):
             return
         self.draw(entries)
 
+    def hoverTick_(self, _timer):
+        # Separate, faster timer: only alpha changes, no rebuild of the
+        # content view, so the fade tracks the cursor smoothly between the
+        # slower 2s data redraws.
+        mouse = NSEvent.mouseLocation()
+        frame = self.window.frame()
+        hovering = (
+            frame.origin.x <= mouse.x <= frame.origin.x + frame.size.width
+            and frame.origin.y <= mouse.y <= frame.origin.y + frame.size.height
+        )
+        target = HOVER_ALPHA if hovering else 1.0
+        if self.window.alphaValue() == target:
+            return
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.currentContext().setDuration_(HOVER_FADE_SECONDS)
+        self.window.animator().setAlphaValue_(target)
+        NSAnimationContext.endGrouping()
+
     @objc.python_method
     def draw(self, entries):
         rows = lines_for(entries)
@@ -351,6 +375,9 @@ def main():
 
     NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         POLL_SECONDS, hud, "tick:", None, True
+    )
+    NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+        HOVER_POLL_SECONDS, hud, "hoverTick:", None, True
     )
     app.run()
 
