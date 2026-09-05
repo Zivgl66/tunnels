@@ -26,7 +26,8 @@
 command per environment.**
 
 - **one command per environment** — `tunnels up dev` opens every cluster and
-  database in that block at once, and skips the ones already running.
+  database in that block at once, in parallel, and skips the ones already
+  running. One target failing does not stop the others.
 - **kubectl just works** — the kubeconfig is rewritten to point at the local
   port, with `tls-server-name` so the certificate still checks out. No
   `/etc/hosts`, no `sudo`. Tools that dial the real hostname directly (like

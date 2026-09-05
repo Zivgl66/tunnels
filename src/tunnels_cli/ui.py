@@ -281,6 +281,10 @@ class Spinner:
             self.stream.flush()
             time.sleep(0.08)
 
+    def update(self, text):
+        """Change the message in place. The running frame picks it up."""
+        self.text = text
+
     def __enter__(self):
         global _ACTIVE_SPINNER
         _ACTIVE_SPINNER = self
@@ -300,3 +304,30 @@ class Spinner:
             self.stream.write("\r\033[2K")
             self.stream.flush()
         return False
+
+
+class Report:
+    """Holds one job's output until it is safe to print.
+
+    Several tunnels start at once, so writing straight to the terminal would
+    interleave their lines. Each collects into a Report instead, and the
+    caller flushes them one at a time in a stable order.
+    """
+
+    def __init__(self):
+        self._lines = []
+
+    def ok(self, text):
+        self._lines.append(("ok", text))
+
+    def warn(self, text):
+        self._lines.append(("warn", text))
+
+    def step(self, text):
+        self._lines.append(("step", text))
+
+    def flush(self):
+        writers = {"ok": ok, "warn": warn, "step": step}
+        for kind, text in self._lines:
+            writers[kind](text)
+        self._lines.clear()
