@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-05
+
 ### Added
 - `tunnels up` starts a config block's targets in parallel instead of one
   after another, so an environment with several clusters comes up in about
