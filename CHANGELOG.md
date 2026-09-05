@@ -6,6 +6,14 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Picking a target that is already up asks what to do with it - `restart`
+  or `stop` - instead of running `up` on a tunnel that is already running.
+  A target that is not up starts as before, with no extra prompt. Closes
+  #12. Breaking: no.
+- Accounts with a live tunnel are marked in the picker's account list, the
+  way targets already were. Breaking: no.
+
 ## [0.9.0] - 2026-09-05
 
 ### Added

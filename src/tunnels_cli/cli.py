@@ -976,35 +976,59 @@ def start_watchdog(minutes=None):
 
 
 def cmd_interactive():
-    """No subcommand given: pick an account and a target, then start it."""
+    """No subcommand given: pick an account and a target, then act on it."""
     print(ui.banner(f"AWS SSM tunnels {ui.sym.dot} v{_version()}"))
     config = load_config()
     accounts = sorted(config)
     if not accounts:
         raise TunnelError("no accounts configured. Run 'tunnels init'.")
-    live = {e["key"] for e in live_state()}
 
     while True:
-        account = menu("Which account?", accounts)
+        # Re-read each pass: a tunnel may have gone up or come down since
+        # the last time through here.
+        entries = live_state()
+        live = {e["key"] for e in entries}
+        live_accounts = {e["config"] for e in entries}
+
+        account = menu("Which account?", [
+            f"{a} {ui.sym.up}" if a in live_accounts else a for a in accounts
+        ])
         if account is None:
             return 0
+        account = account.replace(f" {ui.sym.up}", "")
 
         block = config_block(config, account)
         target_names = sorted(block["targets"])
-        choices = [
-            f"{n} {ui.sym.up}" if f"{account}/{n}" in live else n
-            for n in target_names
-        ] + ["all"]
 
-        target = menu(f"Which target in '{account}'?", choices,
-                      allow_back=True)
-        if target is menu_back:
-            continue          # back / q: return to the account list
-        if target is None:
-            return 0          # ctrl-c: stop here
-        target = target.replace(f" {ui.sym.up}", "")
+        while True:
+            choices = [
+                f"{n} {ui.sym.up}" if f"{account}/{n}" in live else n
+                for n in target_names
+            ] + ["all"]
 
-        return cmd_up(account, [] if target == "all" else [target])
+            target = menu(f"Which target in '{account}'?", choices,
+                          allow_back=True)
+            if target is menu_back:
+                break             # back / q: return to the account list
+            if target is None:
+                return 0          # ctrl-c: stop here
+            target = target.replace(f" {ui.sym.up}", "")
+
+            if target == "all" or f"{account}/{target}" not in live:
+                return cmd_up(account, [] if target == "all" else [target])
+
+            # Already up: starting it again is not what picking it means.
+            action = menu(f"{account}/{target} is up", ["restart", "stop"],
+                          allow_back=True)
+            if action is menu_back:
+                continue          # back: return to the target list
+            if action is None:
+                return 0
+
+            code = cmd_down(account, [target])
+            if action == "stop" or code != 0:
+                return code
+            return cmd_up(account, [target])
 
 
 def cmd_hud():
