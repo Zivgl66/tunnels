@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from tunnels_cli import health, ui
+from tunnels_cli import health, ui, update as updater
 from tunnels_cli.menu import BACK as menu_back
 from tunnels_cli.menu import menu
 
@@ -1031,6 +1031,70 @@ def cmd_interactive():
             return cmd_up(account, [target])
 
 
+PLANS = {
+    "git": "pipx reinstall {package}",
+    "editable": "git -C {path} pull --ff-only, then pipx reinstall {package}",
+    "local": "git -C {path} pull --ff-only, then pipx reinstall {package}",
+    "checkout": "git -C {path} pull --ff-only",
+}
+
+
+def cmd_update(assume_yes=False):
+    """Say whether there is a newer release, and install it the right way.
+
+    What "install it" means depends on how this copy got here, so the
+    method is read from pipx rather than assumed. Editable installs still
+    need reinstalling to refresh their version metadata and dependencies.
+    """
+    current = _version()
+    try:
+        tag, notes = updater.latest_release()
+    except updater.UpdateError as exc:
+        raise TunnelError(str(exc))
+
+    if updater.parse_version(current) >= updater.parse_version(tag):
+        ui.ok(f"tunnels {current} is the latest")
+        return 0
+
+    print(ui.rule(f"update available {ui.sym.dot} {current} "
+                  f"{ui.sym.arrow} {tag}"))
+    ui.info(notes)
+
+    install = updater.install_method()
+    if install.kind == "unknown":
+        ui.warn("cannot tell how this copy was installed")
+        ui.info(f"install the new version with: "
+                f"pipx install --force {updater.SOURCE}")
+        return 1
+
+    if install.path and updater.is_dirty(install.path):
+        ui.warn(f"{install.path} has uncommitted changes; not pulling")
+        ui.info("commit or stash them, then run 'tunnels update' again")
+        return 1
+
+    plan = PLANS[install.kind].format(package=updater.PACKAGE,
+                                      path=install.path)
+    ui.info(f"installed as: {install.kind} {ui.sym.dot} will run: {plan}")
+
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            ui.info("run 'tunnels update --yes' to install it")
+            return 1
+        if input("update now? [y/N] ").strip().lower() not in {"y", "yes"}:
+            return 1
+
+    try:
+        if install.path:
+            code = updater.pull(install.path)
+            if code != 0:
+                return code
+        if install.kind in ("git", "editable", "local"):
+            return updater.reinstall()
+        return 0
+    except updater.UpdateError as exc:
+        raise TunnelError(str(exc))
+
+
 def cmd_hud():
     """Toggle: start it when it is off, stop it when it is on."""
     pid = hud_running()
@@ -1467,6 +1531,10 @@ def main(argv=None):
     down.add_argument("config", help="config name, or 'all'")
     down.add_argument("targets", nargs="*")
 
+    upd = sub.add_parser("update", help="check for a newer release and install it")
+    upd.add_argument("--yes", action="store_true",
+                     help="install it without asking")
+
     sub.add_parser("status", help="list live tunnels")
     sub.add_parser("profiles", help="list configured accounts")
     sub.add_parser("init", help="write a starter config file")
@@ -1497,6 +1565,8 @@ def main(argv=None):
             return cmd_up(args.config, args.targets, args.keepalive, args.terraform, args.ttl)
         if args.command == "down":
             return cmd_down(args.config, args.targets)
+        if args.command == "update":
+            return cmd_update(args.yes)
         if args.command == "status":
             return cmd_status()
         if args.command == "profiles":
