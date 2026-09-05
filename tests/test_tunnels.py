@@ -1461,116 +1461,79 @@ def _live(key="dev/db", config="dev", target="db", port=15432, age=720):
             "remote_host": "h", "remote_port": 5432}
 
 
-def test_cmd_interactive_offers_stop_only_when_a_tunnel_is_live(monkeypatch):
-    shown = []
-    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "menu",
-                        lambda title, options, **kw: shown.append(list(options)))
-
-    monkeypatch.setattr(tunnels, "live_state", lambda: [])
-    tunnels.cmd_interactive()
-    assert not any("stop" in row for row in shown[0]), shown[0]
-
-    shown.clear()
-    monkeypatch.setattr(tunnels, "live_state", lambda: [_live()])
-    tunnels.cmd_interactive()
-    assert any("stop" in row for row in shown[0]), shown[0]
-
-
-def test_cmd_interactive_stop_row_tears_down_the_chosen_tunnel(monkeypatch):
-    calls = []
-    entries = [_live(), _live("dev/eks-main", target="eks-main", port=9443)]
-    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "live_state", lambda: entries)
-    monkeypatch.setattr(tunnels, "cmd_down",
-                        lambda config, targets: calls.append((config, targets)) or 0)
-
-    shown = []
-
-    def fake_menu(title, options, **kw):
-        shown.append(list(options))
-        return tunnels.STOP_ROW if len(shown) == 1 else options[1]
-
-    monkeypatch.setattr(tunnels, "menu", fake_menu)
-
-    assert tunnels.cmd_interactive() == 0
-    assert calls == [("dev", ["eks-main"])]
-
-
-def test_cmd_interactive_stop_menu_offers_all(monkeypatch):
-    calls = []
-    entries = [_live(), _live("dev/eks-main", target="eks-main", port=9443)]
-    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "live_state", lambda: entries)
-    monkeypatch.setattr(tunnels, "cmd_down",
-                        lambda config, targets: calls.append((config, targets)) or 0)
-
-    shown = []
-
-    def fake_menu(title, options, **kw):
-        shown.append(list(options))
-        return tunnels.STOP_ROW if len(shown) == 1 else options[-1]
-
-    monkeypatch.setattr(tunnels, "menu", fake_menu)
-    tunnels.cmd_interactive()
-
-    assert shown[1][-1].startswith("all"), shown[1]
-    assert "2" in shown[1][-1], "the all row should say how many it stops"
-    assert calls == [("all", [])]
-
-
-def test_cmd_interactive_stop_rows_show_port_and_age(monkeypatch):
-    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "live_state", lambda: [_live(age=720)])
-    monkeypatch.setattr(tunnels, "cmd_down", lambda *a: 0)
-
-    shown = []
-
-    def fake_menu(title, options, **kw):
-        shown.append(list(options))
-        return tunnels.STOP_ROW if len(shown) == 1 else None
-
-    monkeypatch.setattr(tunnels, "menu", fake_menu)
-    tunnels.cmd_interactive()
-
-    row = shown[1][0]
-    assert "dev/db" in row and ":15432" in row and "12m" in row, row
-
-
-def test_cmd_interactive_stop_rows_line_up(monkeypatch):
-    # Ports of different widths must not stagger the age column.
-    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "live_state", lambda: [
-        _live("dev/db", target="db", port=15432),
-        _live("dev/eks-main", target="eks-main", port=9443),
-    ])
-    monkeypatch.setattr(tunnels, "cmd_down", lambda *a: 0)
-
-    shown = []
-
-    def fake_menu(title, options, **kw):
-        shown.append(list(options))
-        return tunnels.STOP_ROW if len(shown) == 1 else None
-
-    monkeypatch.setattr(tunnels, "menu", fake_menu)
-    tunnels.cmd_interactive()
-
-    ages = [row.index("12m") for row in shown[1][:2]]
-    assert len(set(ages)) == 1, shown[1]
-
-
-def test_cmd_interactive_back_from_stop_menu_returns_to_the_accounts(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
-    monkeypatch.setattr(tunnels, "live_state", lambda: [_live()])
+def _picker(monkeypatch, picks, entries=(), config=None):
+    """Drive cmd_interactive with canned menu answers; record what it did."""
+    done = {"up": [], "down": []}
+    monkeypatch.setattr(tunnels, "load_config", lambda: config or GOOD)
+    monkeypatch.setattr(tunnels, "live_state", lambda: list(entries))
     monkeypatch.setattr(tunnels, "cmd_up",
-                        lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+                        lambda c, t, keepalive=None: done["up"].append((c, t)) or 0)
     monkeypatch.setattr(tunnels, "cmd_down",
-                        lambda *a: (_ for _ in ()).throw(AssertionError("should not stop")))
+                        lambda c, t: done["down"].append((c, t)) or 0)
+    shown = []
+    answers = iter(picks)
 
-    # stop row, back out of it, then the normal start flow
-    picks = iter([tunnels.STOP_ROW, tunnels.menu_back, "dev", "db"])
-    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
+    def fake_menu(title, options, **kw):
+        shown.append((title, list(options)))
+        return next(answers)
 
-    assert tunnels.cmd_interactive() == 0
-    assert calls == [("dev", ["db"])]
+    monkeypatch.setattr(tunnels, "menu", fake_menu)
+    done["code"] = tunnels.cmd_interactive()
+    done["shown"] = shown
+    return done
+
+
+def test_picker_offers_stop_and_restart_when_the_target_is_up(monkeypatch):
+    out = _picker(monkeypatch, ["dev", f"db {tunnels.ui.sym.up}", None],
+                  entries=[_live()])
+    title, options = out["shown"][2]
+    assert "dev/db" in title, title
+    assert options == ["restart", "stop"], options
+
+
+def test_picker_does_not_ask_when_the_target_is_not_up(monkeypatch):
+    out = _picker(monkeypatch, ["dev", "db"], entries=[])
+    assert len(out["shown"]) == 2, out["shown"]     # account, target - no third
+    assert out["up"] == [("dev", ["db"])]
+
+
+def test_picker_stop_takes_the_tunnel_down_and_does_not_restart_it(monkeypatch):
+    out = _picker(monkeypatch, ["dev", f"db {tunnels.ui.sym.up}", "stop"],
+                  entries=[_live()])
+    assert out["down"] == [("dev", ["db"])]
+    assert out["up"] == []
+
+
+def test_picker_restart_stops_then_starts_the_same_target(monkeypatch):
+    out = _picker(monkeypatch, ["dev", f"db {tunnels.ui.sym.up}", "restart"],
+                  entries=[_live()])
+    assert out["down"] == [("dev", ["db"])]
+    assert out["up"] == [("dev", ["db"])]
+
+
+def test_picker_back_from_the_action_menu_returns_to_the_targets(monkeypatch):
+    # back out of restart/stop, then start a different target in the same
+    # account - the target list, not the account list, is one level up.
+    out = _picker(monkeypatch,
+                  ["dev", f"db {tunnels.ui.sym.up}", tunnels.menu_back, "eks-main"],
+                  entries=[_live()])
+    assert [t for t, _ in out["shown"]].count("Which account?") == 1
+    assert out["up"] == [("dev", ["eks-main"])]
+
+
+def test_picker_all_still_starts_everything_even_with_one_up(monkeypatch):
+    out = _picker(monkeypatch, ["dev", "all"], entries=[_live()])
+    assert out["up"] == [("dev", [])]
+    assert out["down"] == []
+
+
+def test_picker_all_row_wins_over_a_target_actually_named_all(monkeypatch):
+    # A config may name a target "all", which collides with the row that
+    # means "every target". The row keeps its meaning, so picking it starts
+    # the whole account rather than offering to restart the one tunnel.
+    config = {"dev": {**GOOD["dev"],
+                      "targets": {**GOOD["dev"]["targets"], "all": {"host": "h", "port": 1}}}}
+    out = _picker(monkeypatch, ["dev", "all"], config=config,
+                  entries=[_live("dev/all", target="all")])
+    assert out["up"] == [("dev", [])]
+    assert out["down"] == []

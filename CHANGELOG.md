@@ -7,10 +7,10 @@ and this project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- The interactive picker can stop tunnels, not only start them. When
-  something is running, the account list gains a `stop a tunnel` row
-  leading to the live tunnels with their port and age, plus an `all` row.
-  Nothing changes when nothing is up. Closes #12. Breaking: no.
+- Picking a target that is already up asks what to do with it - `restart`
+  or `stop` - instead of running `up` on a tunnel that is already running.
+  A target that is not up starts as before, with no extra prompt. Closes
+  #12. Breaking: no.
 - Accounts with a live tunnel are marked in the picker's account list, the
   way targets already were. Breaking: no.
 
