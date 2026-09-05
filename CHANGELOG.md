@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-05
+
 ### Added
 - Picking a target that is already up asks what to do with it - `restart`
   or `stop` - instead of running `up` on a tunnel that is already running.
