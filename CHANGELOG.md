@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-05
+
 ### Added
 - `tunnels update` checks GitHub for a newer release and installs it. What
   "install it" means is read from pipx's own record rather than assumed:
