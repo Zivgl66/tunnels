@@ -1452,3 +1452,125 @@ def test_menu_filtering_down_does_not_leave_stale_rows_on_screen():
     left = " ".join(screen.lines())
     assert "core-sbx" not in left, f"stale rows left on screen: {screen.lines()}"
     assert "core-dev" not in left, f"stale rows left on screen: {screen.lines()}"
+
+
+def _live(key="dev/db", config="dev", target="db", port=15432, age=720):
+    return {"key": key, "config": config, "target": target,
+            "local_port": port, "started": time.time() - age,
+            "account": "1234", "cluster": None, "context": None,
+            "remote_host": "h", "remote_port": 5432}
+
+
+def test_cmd_interactive_offers_stop_only_when_a_tunnel_is_live(monkeypatch):
+    shown = []
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "menu",
+                        lambda title, options, **kw: shown.append(list(options)))
+
+    monkeypatch.setattr(tunnels, "live_state", lambda: [])
+    tunnels.cmd_interactive()
+    assert not any("stop" in row for row in shown[0]), shown[0]
+
+    shown.clear()
+    monkeypatch.setattr(tunnels, "live_state", lambda: [_live()])
+    tunnels.cmd_interactive()
+    assert any("stop" in row for row in shown[0]), shown[0]
+
+
+def test_cmd_interactive_stop_row_tears_down_the_chosen_tunnel(monkeypatch):
+    calls = []
+    entries = [_live(), _live("dev/eks-main", target="eks-main", port=9443)]
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "live_state", lambda: entries)
+    monkeypatch.setattr(tunnels, "cmd_down",
+                        lambda config, targets: calls.append((config, targets)) or 0)
+
+    shown = []
+
+    def fake_menu(title, options, **kw):
+        shown.append(list(options))
+        return tunnels.STOP_ROW if len(shown) == 1 else options[1]
+
+    monkeypatch.setattr(tunnels, "menu", fake_menu)
+
+    assert tunnels.cmd_interactive() == 0
+    assert calls == [("dev", ["eks-main"])]
+
+
+def test_cmd_interactive_stop_menu_offers_all(monkeypatch):
+    calls = []
+    entries = [_live(), _live("dev/eks-main", target="eks-main", port=9443)]
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "live_state", lambda: entries)
+    monkeypatch.setattr(tunnels, "cmd_down",
+                        lambda config, targets: calls.append((config, targets)) or 0)
+
+    shown = []
+
+    def fake_menu(title, options, **kw):
+        shown.append(list(options))
+        return tunnels.STOP_ROW if len(shown) == 1 else options[-1]
+
+    monkeypatch.setattr(tunnels, "menu", fake_menu)
+    tunnels.cmd_interactive()
+
+    assert shown[1][-1].startswith("all"), shown[1]
+    assert "2" in shown[1][-1], "the all row should say how many it stops"
+    assert calls == [("all", [])]
+
+
+def test_cmd_interactive_stop_rows_show_port_and_age(monkeypatch):
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "live_state", lambda: [_live(age=720)])
+    monkeypatch.setattr(tunnels, "cmd_down", lambda *a: 0)
+
+    shown = []
+
+    def fake_menu(title, options, **kw):
+        shown.append(list(options))
+        return tunnels.STOP_ROW if len(shown) == 1 else None
+
+    monkeypatch.setattr(tunnels, "menu", fake_menu)
+    tunnels.cmd_interactive()
+
+    row = shown[1][0]
+    assert "dev/db" in row and ":15432" in row and "12m" in row, row
+
+
+def test_cmd_interactive_stop_rows_line_up(monkeypatch):
+    # Ports of different widths must not stagger the age column.
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "live_state", lambda: [
+        _live("dev/db", target="db", port=15432),
+        _live("dev/eks-main", target="eks-main", port=9443),
+    ])
+    monkeypatch.setattr(tunnels, "cmd_down", lambda *a: 0)
+
+    shown = []
+
+    def fake_menu(title, options, **kw):
+        shown.append(list(options))
+        return tunnels.STOP_ROW if len(shown) == 1 else None
+
+    monkeypatch.setattr(tunnels, "menu", fake_menu)
+    tunnels.cmd_interactive()
+
+    ages = [row.index("12m") for row in shown[1][:2]]
+    assert len(set(ages)) == 1, shown[1]
+
+
+def test_cmd_interactive_back_from_stop_menu_returns_to_the_accounts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
+    monkeypatch.setattr(tunnels, "live_state", lambda: [_live()])
+    monkeypatch.setattr(tunnels, "cmd_up",
+                        lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+    monkeypatch.setattr(tunnels, "cmd_down",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("should not stop")))
+
+    # stop row, back out of it, then the normal start flow
+    picks = iter([tunnels.STOP_ROW, tunnels.menu_back, "dev", "db"])
+    monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
+
+    assert tunnels.cmd_interactive() == 0
+    assert calls == [("dev", ["db"])]

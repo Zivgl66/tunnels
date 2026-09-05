@@ -975,6 +975,42 @@ def start_watchdog(minutes=None):
     return True
 
 
+# Not a real account name, so it cannot collide with one from the config.
+STOP_ROW = "\u25be stop a tunnel"
+
+
+def stop_choices(entries):
+    """Label -> entry, for the stop menu. Ordered by tunnel name.
+
+    The label carries the port and the age because the name alone does not
+    say which of two similar tunnels is the one you meant to stop.
+    """
+    width = max(len(e["key"]) for e in entries)
+    port_width = max(len(str(e["local_port"])) for e in entries) + 1
+    rows = {}
+    for entry in sorted(entries, key=lambda e: e["key"]):
+        age = ui.human_age(time.time() - entry["started"])
+        port = f":{entry['local_port']}".ljust(port_width)
+        rows[f"{entry['key'].ljust(width)}  {port}  {age}"] = entry
+    return rows
+
+
+def interactive_down(entries):
+    """The stop half of the picker. Returns None to mean 'go back'."""
+    rows = stop_choices(entries)
+    all_row = f"all ({len(entries)} tunnel{'' if len(entries) == 1 else 's'})"
+
+    pick = menu("Stop which tunnel?", list(rows) + [all_row], allow_back=True)
+    if pick is menu_back:
+        return None
+    if pick is None:
+        return 0
+    if pick == all_row:
+        return cmd_down("all", [])
+    entry = rows[pick]
+    return cmd_down(entry["config"], [entry["target"]])
+
+
 def cmd_interactive():
     """No subcommand given: pick an account and a target, then start it."""
     print(ui.banner(f"AWS SSM tunnels {ui.sym.dot} v{_version()}"))
@@ -982,13 +1018,30 @@ def cmd_interactive():
     accounts = sorted(config)
     if not accounts:
         raise TunnelError("no accounts configured. Run 'tunnels init'.")
-    live = {e["key"] for e in live_state()}
 
     while True:
-        account = menu("Which account?", accounts)
+        # Re-read on every pass: a tunnel may have gone up or come down
+        # since the last time through this loop.
+        entries = live_state()
+        live = {e["key"] for e in entries}
+        live_accounts = {e["config"] for e in entries}
+
+        rows = [
+            f"{a} {ui.sym.up}" if a in live_accounts else a for a in accounts
+        ]
+        if entries:
+            rows.append(STOP_ROW)
+
+        account = menu("Which account?", rows)
         if account is None:
             return 0
+        if account == STOP_ROW:
+            code = interactive_down(entries)
+            if code is None:
+                continue      # back / q: return to the account list
+            return code
 
+        account = account.replace(f" {ui.sym.up}", "")
         block = config_block(config, account)
         target_names = sorted(block["targets"])
         choices = [
