@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-05
+
 ### Added
 - The interactive picker filters. Press `/` and type to narrow the list;
   backspace edits the query and backspacing past the start returns to the
