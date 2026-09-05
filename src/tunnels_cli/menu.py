@@ -12,6 +12,13 @@ HOME_KEYS = {"g", "\x1b[H"}
 END_KEYS = {"G", "\x1b[F"}
 BACK_KEYS = {"\x1b[D", "h", "b"}
 
+# In filter mode every letter is text, so only the arrows still move.
+UP_ARROW = "\x1b[A"
+DOWN_ARROW = "\x1b[B"
+FILTER_KEY = "/"
+BACKSPACE_KEYS = {"\x7f", "\x08"}
+CLEAR_KEY = "\x15"                      # ctrl-u
+
 # Returned instead of a choice when the user asks to step back a level, so a
 # caller can tell "go back" apart from "cancel the whole thing" (None).
 BACK = "\x00back"
@@ -45,8 +52,10 @@ def _restore_mode(fd, old):
     termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-HINT = "↑/↓ or j/k move · g/G first/last · enter select · q cancel"
-BACK_HINT = "↑/↓ or j/k move · enter select · ←/b/q back · ctrl-c quit"
+HINT = "↑/↓ or j/k move · g/G first/last · / filter · enter select · q cancel"
+BACK_HINT = "↑/↓ or j/k move · / filter · enter select · ←/b/q back · ctrl-c quit"
+FILTER_HINT = "↑/↓ move · enter select · backspace edit · ctrl-c quit"
+NO_MATCH = "(no match)"
 PAGE_SIZE = 10
 
 
@@ -58,21 +67,36 @@ def _window_start(index, page_size, total):
     return max(0, start if index >= start else index)
 
 
-def _draw(title, options, index, out, use_color, first, page_size,
-          allow_back=False):
+def _draw(title, options, index, out, use_color, prev_slots, page_size,
+          allow_back=False, query=None):
     total = len(options)
-    slots = min(page_size, total)
+    # An empty result still draws one row - the "no match" line - so the
+    # block keeps a predictable height while a query is being typed.
+    slots = min(page_size, total) or 1
     start = _window_start(index, page_size, total)
 
-    hint = BACK_HINT if allow_back else HINT
+    if query is None:
+        hint = BACK_HINT if allow_back else HINT
+    else:
+        hint = FILTER_HINT
+        title = f"{title}  /{query}"
     if total > page_size:
         hint = f"{hint} — {start + 1}-{start + slots} of {total}"
 
-    if not first:
-        out.write(f"\033[{slots + 2}A")  # back up over title + hint + option slots
+    if prev_slots:
+        # back up over the *previous* frame, whose height a filter may have
+        # changed: title + hint + however many option slots it drew
+        out.write(f"\033[{prev_slots + 2}A")
     out.write("\033[2K" + (f"{BOLD_CYAN}{title}{RESET}" if use_color else title)
               + "\r\n")
     out.write("\033[2K" + (f"{DIM}{hint}{RESET}" if use_color else hint) + "\r\n")
+
+    if not total:
+        line = f"  {NO_MATCH}"
+        out.write("\033[2K" + (f"{DIM}{line}{RESET}" if use_color else line) + "\r\n")
+        _wipe_below(out, prev_slots - slots)
+        out.flush()
+        return slots
 
     pointer = ui.sym.arrow if ui.unicode_on() else ">"
     for i in range(start, start + slots):
@@ -86,8 +110,32 @@ def _draw(title, options, index, out, use_color, first, page_size,
         else:
             line = f"{marker}{opt}"
         out.write("\033[2K" + line + "\r\n")
+    _wipe_below(out, prev_slots - slots)
     out.flush()
     return slots
+
+
+def _wipe_below(out, extra):
+    """Erase rows the previous frame drew and this one no longer fills.
+
+    A filter shrinks the list between frames. Backing up over the old block
+    and drawing a shorter one leaves its tail on screen, so the rows that
+    dropped out have to be erased explicitly - then the cursor comes back to
+    the end of the block that was actually drawn.
+    """
+    if extra <= 0:
+        return
+    for _ in range(extra):
+        out.write("\033[2K\r\n")
+    out.write(f"\033[{extra}A")
+
+
+def _matches(options, query):
+    """Rows containing `query`, case-insensitively, in their original order."""
+    if not query:
+        return list(options)
+    needle = query.lower()
+    return [o for o in options if needle in o.lower()]
 
 
 def _clear(out, lines):
@@ -154,31 +202,59 @@ def menu(title, options, read_key=None, out=None, page_size=PAGE_SIZE,
         fd, old = _raw_mode(sys.stdin)
 
     index = 0
-    first = True
-    slots = min(page_size, len(options))
+    prev_slots = 0
+    query = None                          # None = not filtering; "" = filtering
     try:
         while True:
-            slots = _draw(title, options, index, out, use_color, first,
-                          page_size, allow_back)
-            first = False
+            visible = _matches(options, query)
+            if index >= len(visible):
+                index = max(len(visible) - 1, 0)
+            prev_slots = _draw(title, visible, index, out, use_color,
+                               prev_slots, page_size, allow_back, query)
             key = reader()
-            if key == "\x03":                     # ctrl-c always quits outright
-                return None
-            if allow_back and (key in BACK_KEYS or key in CANCEL_KEYS):
-                return BACK
-            if key in CANCEL_KEYS:
+
+            if key == "\x03":                 # ctrl-c always quits outright
                 return None
             if key in ENTER_KEYS:
-                return options[index]
-            if key in UP_KEYS:
-                index = (index - 1) % len(options)
-            elif key in DOWN_KEYS:
-                index = (index + 1) % len(options)
-            elif key in HOME_KEYS:
+                if not visible:               # nothing to pick yet; keep typing
+                    continue
+                return visible[index]
+
+            if query is None:
+                if allow_back and (key in BACK_KEYS or key in CANCEL_KEYS):
+                    return BACK
+                if key in CANCEL_KEYS:
+                    return None
+                if key == FILTER_KEY:
+                    query = ""
+                    index = 0
+                elif key in UP_KEYS:
+                    index = (index - 1) % len(visible)
+                elif key in DOWN_KEYS:
+                    index = (index + 1) % len(visible)
+                elif key in HOME_KEYS:
+                    index = 0
+                elif key in END_KEYS:
+                    index = len(visible) - 1
+                continue
+
+            # Filtering: the letters are text now, so only the arrows move.
+            if key in BACKSPACE_KEYS:
+                # Backspace past the start of the query leaves filter mode,
+                # which restores the full list and the normal bindings.
+                query = query[:-1] if query else None
                 index = 0
-            elif key in END_KEYS:
-                index = len(options) - 1
+            elif key == CLEAR_KEY:
+                query = ""
+                index = 0
+            elif visible and key == UP_ARROW:
+                index = (index - 1) % len(visible)
+            elif visible and key == DOWN_ARROW:
+                index = (index + 1) % len(visible)
+            elif len(key) == 1 and key.isprintable():
+                query += key
+                index = 0
     finally:
         if fd is not None:
             _restore_mode(fd, old)
-        _clear(out, slots + 2)
+        _clear(out, prev_slots + 2)

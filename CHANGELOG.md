@@ -6,6 +6,20 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- The interactive picker filters. Press `/` and type to narrow the list;
+  backspace edits the query and backspacing past the start returns to the
+  full list. It is behind `/` because the letters are already bound —
+  `j`/`k` move, `g`/`G` jump, `q` cancels — so typing a name into an
+  unfiltered list would move, jump and quit. Both the account list and the
+  target list get it. Breaking: no.
+
+### Fixed
+- The picker left rows on screen when a list got shorter between frames.
+  It backed up over the old block and drew a shorter one without erasing
+  the tail, so the dropped rows stayed visible. Only reachable through the
+  new filter, but the redraw was wrong on its own.
+
 ## [0.8.2] - 2026-09-05
 
 ## [0.8.1] - 2026-09-05
