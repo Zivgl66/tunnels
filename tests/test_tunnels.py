@@ -1,5 +1,6 @@
 """Unit tests for the pure helpers in `tunnels`. No AWS, no network."""
 
+import io
 import os
 import re
 import socket
@@ -1318,3 +1319,136 @@ def test_watchdog_forgets_the_misses_once_a_port_answers_again(tmp_path, monkeyp
         strikes = {"dev/argo": watchdog.STRIKES - 1}
         assert watchdog.sweep(None, strikes) == 0
         assert strikes == {}
+
+
+def test_menu_slash_filters_the_list_and_enter_picks_the_match():
+    keys = iter(["/", "g", "a", "m", "\r"])
+    result = menu("Pick one", ["alpha", "beta", "gamma"], read_key=lambda: next(keys))
+    assert result == "gamma"
+
+
+def test_menu_backspace_past_the_start_leaves_filter_mode():
+    # "/z" matches nothing; two backspaces clear it and drop back out of
+    # filter mode, where j/k move again instead of typing.
+    keys = iter(["/", "z", "\x7f", "\x7f", "j", "\r"])
+    result = menu("Pick one", ["alpha", "beta"], read_key=lambda: next(keys))
+    assert result == "beta"
+
+
+def test_menu_filter_is_case_insensitive():
+    # Both sides have to be folded: a lower-case query must find an option
+    # that is capitalised, and an upper-case query a lower-case option.
+    keys = iter(["/", "a", "l", "p", "\r"])
+    assert menu("Pick one", ["Alpha", "beta"],
+                read_key=lambda: next(keys)) == "Alpha"
+
+    keys = iter(["/", "G", "A", "M", "\r"])
+    assert menu("Pick one", ["alpha", "gamma"],
+                read_key=lambda: next(keys)) == "gamma"
+
+
+def test_menu_ctrl_c_quits_from_inside_the_filter():
+    keys = iter(["/", "a", "\x03"])
+    assert menu("Pick one", ["alpha"], read_key=lambda: next(keys)) is None
+
+
+def test_menu_enter_on_no_match_keeps_the_query_editable():
+    # "zz" matches nothing, so enter does nothing rather than picking a row
+    # that is not on screen; backspacing back to "a" recovers.
+    keys = iter(["/", "z", "z", "\r", "\x7f", "\x7f", "a", "\r"])
+    result = menu("Pick one", ["alpha", "beta"], read_key=lambda: next(keys))
+    assert result == "alpha"
+
+
+def test_menu_no_match_is_drawn_so_the_list_does_not_look_frozen():
+    out = io.StringIO()
+    keys = iter(["/", "z", "\x03"])
+    menu("Pick one", ["alpha"], read_key=lambda: next(keys), out=out)
+    assert "(no match)" in out.getvalue()
+
+
+def test_menu_filter_resets_the_cursor_to_the_first_match():
+    # "a" matches all four; move down to "kalamata", then narrow to "al",
+    # which still matches two rows. The cursor has to go back to the first
+    # match - carrying the old index over would land on "kalamata" again,
+    # a row the user never pointed at in this list.
+    options = ["alpha", "beta", "gamma", "kalamata"]
+    keys = iter(["/", "a", "\x1b[B", "\x1b[B", "\x1b[B", "l", "\r"])
+    result = menu("Pick one", options, read_key=lambda: next(keys))
+    assert result == "alpha"
+
+
+def test_menu_arrows_still_move_while_filtering():
+    keys = iter(["/", "a", "\x1b[B", "\r"])  # "a" matches all three
+    result = menu("Pick one", ["alpha", "beta", "gamma"],
+                  read_key=lambda: next(keys))
+    assert result == "beta"
+
+
+def test_menu_counter_counts_the_filtered_rows():
+    out = io.StringIO()
+    options = [f"acct-{i}" for i in range(12)] + ["other"]
+    keys = iter(["/", "a", "c", "\x03"])
+    menu("Pick one", options, read_key=lambda: next(keys), out=out,
+         page_size=10)
+    assert "1-10 of 12" in out.getvalue()   # 12 matches, not 13 rows
+
+
+def test_menu_back_still_works_after_leaving_filter_mode():
+    from tunnels_cli.menu import BACK
+
+    keys = iter(["/", "\x7f", "b"])
+    assert menu("Pick one", ["alpha"], read_key=lambda: next(keys),
+                allow_back=True) is BACK
+
+
+class FakeScreen(io.StringIO):
+    """Just enough terminal to see what the menu leaves behind.
+
+    Understands the three things menu() emits: erase-line, cursor-up, and
+    a newline that moves down a row. Without this, a shrinking filter looks
+    fine in a captured string - the stale rows are still in the stream, just
+    never overwritten - and only shows up on a real terminal.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.rows = [""]
+        self.y = 0
+
+    def isatty(self):
+        return False
+
+    def write(self, s):
+        i = 0
+        while i < len(s):
+            if s.startswith("\033[2K", i):
+                self.rows[self.y] = ""
+                i += 4
+            elif (m := re.match(r"\033\[(\d+)A", s[i:])):
+                self.y = max(0, self.y - int(m.group(1)))
+                i += m.end()
+            elif s[i] == "\n":
+                self.y += 1
+                while len(self.rows) <= self.y:
+                    self.rows.append("")
+                i += 1
+            elif s[i] == "\r":
+                i += 1
+            else:
+                self.rows[self.y] += s[i]
+                i += 1
+        return len(s)
+
+    def lines(self):
+        return [r for r in self.rows if r.strip()]
+
+
+def test_menu_filtering_down_does_not_leave_stale_rows_on_screen():
+    screen = FakeScreen()
+    keys = iter(["/", "c", "o", "r", "e", "-", "t", "\x03"])
+    menu("Which account?", ["alm-dev", "core-dev", "core-sbx", "core-tst"],
+         read_key=lambda: next(keys), out=screen)
+    left = " ".join(screen.lines())
+    assert "core-sbx" not in left, f"stale rows left on screen: {screen.lines()}"
+    assert "core-dev" not in left, f"stale rows left on screen: {screen.lines()}"
