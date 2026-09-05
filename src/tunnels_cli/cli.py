@@ -8,13 +8,15 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 import yaml
 
-from tunnels_cli import ui
+from tunnels_cli import health, ui
 from tunnels_cli.menu import BACK as menu_back
 from tunnels_cli.menu import menu
 
@@ -154,17 +156,44 @@ def remember_port(key, port):
         json.dump(ports, handle, indent=2)
 
 
-def pick_port(preferred, key=None):
-    """A pinned port wins, then the one used last time, then any free port."""
-    if preferred and port_is_free(preferred):
+def pick_port(preferred, key=None, taken=()):
+    """A pinned port wins, then the one used last time, then any free port.
+
+    `taken` excludes ports another target in this same run has already been
+    handed but has not bound yet - the OS will happily offer the same free
+    port twice in that window.
+    """
+    if preferred and preferred not in taken and port_is_free(preferred):
         return preferred
     if not preferred and key:
         last = remembered_port(key)
-        if last and port_is_free(last):
+        if last and last not in taken and port_is_free(last):
             return last
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    while True:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        if port not in taken:
+            return port
+
+
+# Guards for the things several targets starting at once would otherwise
+# race on: the port they are handed, the state file, and ~/.kube/config.
+_PORT_LOCK = threading.Lock()
+_STATE_LOCK = threading.Lock()
+_KUBECONFIG_LOCK = threading.Lock()
+
+# ponytail: a plain set, never pruned. One CLI run starts a handful of
+# tunnels and then exits, so there is nothing here worth reclaiming.
+_CLAIMED_PORTS = set()
+
+
+def claim_port(preferred, key):
+    """Pick a port and reserve it for the rest of this run."""
+    with _PORT_LOCK:
+        port = pick_port(preferred, key=key, taken=_CLAIMED_PORTS)
+        _CLAIMED_PORTS.add(port)
+        return port
 
 
 def pid_alive(pid):
@@ -278,11 +307,17 @@ def patch_kubeconfig(kubeconfig, context_name, local_port, endpoint_host):
 def write_kubeconfig_patch(context_name, local_port, host):
     """Read ~/.kube/config, patch it, write it back."""
     path = Path(os.environ.get("KUBECONFIG", Path.home() / ".kube" / "config"))
-    with path.open() as handle:
-        kubeconfig = yaml.safe_load(handle)
+    try:
+        with path.open() as handle:
+            kubeconfig = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError) as exc:
+        raise TunnelError(f"could not read kubeconfig at {path}: {exc}") from exc
     patched = patch_kubeconfig(kubeconfig, context_name, local_port, host)
-    with path.open("w") as handle:
-        yaml.safe_dump(patched, handle, default_flow_style=False)
+    try:
+        with path.open("w") as handle:
+            yaml.safe_dump(patched, handle, default_flow_style=False)
+    except OSError as exc:
+        raise TunnelError(f"could not write kubeconfig at {path}: {exc}") from exc
 
 
 def aws(profile, region, *args, capture=True):
@@ -297,20 +332,47 @@ def aws(profile, region, *args, capture=True):
     return json.loads(result.stdout)
 
 
-def ensure_sso(profile, region):
-    """Log in only when the cached token is gone or expired."""
+def cached_account(profile):
+    """The account id a cached SSO token still buys, or None if it is gone."""
     probe = subprocess.run(
         ["aws", "--profile", profile, "sts", "get-caller-identity", "--output", "json"],
         capture_output=True, text=True,
     )
-    if probe.returncode == 0:
-        return json.loads(probe.stdout)["Account"]
-    print(f"sso token missing or expired for '{profile}'. Logging in...")
+    if probe.returncode != 0:
+        return None
+    return json.loads(probe.stdout)["Account"]
+
+
+def sso_login(profile, region):
+    """Run the interactive login. Opens a browser and prints its own prompts."""
     login = subprocess.run(["aws", "--profile", profile, "sso", "login"])
     if login.returncode != 0:
         raise TunnelError(f"aws sso login failed for profile '{profile}'")
-    identity = aws(profile, region, "sts", "get-caller-identity")
-    return identity["Account"]
+    return aws(profile, region, "sts", "get-caller-identity")["Account"]
+
+
+def ensure_sso(profile, region):
+    """Log in only when the cached token is gone or expired."""
+    account = cached_account(profile)
+    if account:
+        return account
+    ui.warn(f"sso token missing or expired for '{profile}', logging in")
+    return sso_login(profile, region)
+
+
+def resolve_account(profile, region):
+    """ensure_sso, with a spinner over the part that is safe to cover.
+
+    Only the cached-token probe runs under the spinner: `aws sso login`
+    opens a browser and prints prompts of its own, and a spinner thread
+    would write straight over them.
+    """
+    with ui.Spinner(f"checking credentials for {profile}"):
+        account = cached_account(profile)
+    if account:
+        return account
+    ui.warn(f"sso token missing or expired for '{profile}', logging in")
+    return sso_login(profile, region)
 
 
 def resolve_jump(profile, region, jump):
@@ -361,11 +423,16 @@ def eks_endpoint(profile, region, cluster):
 
 
 def update_kubeconfig(profile, region, cluster, alias):
-    subprocess.run(
+    result = subprocess.run(
         ["aws", "--profile", profile, "--region", region, "eks", "update-kubeconfig",
          "--name", cluster, "--alias", alias],
-        check=True, capture_output=True, text=True,
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        raise TunnelError(
+            f"could not write a kubeconfig entry for '{cluster}': "
+            f"{(result.stderr or '').strip()}"
+        )
 
 
 def wait_for_port(port, timeout=20):
@@ -470,40 +537,42 @@ def remove_hosts_entry(key):
 
 
 def start_target(config_name, name, target, block, account, jump_cache,
-                 entries, terraform):
-    """Bring one target up and record it. Raises TunnelError if it cannot."""
+                 entries, report):
+    """Bring one target up and record it. Raises if it cannot.
+
+    Targets start in parallel, so nothing here writes to the terminal:
+    messages go to `report` and are printed together once the run is over.
+    """
     profile, region = block["profile"], block["region"]
     key = f"{config_name}/{name}"
     label = ui.paint(name, "bright_cyan", "bold")
 
-    jump = jump_for(block, name, target)
-    if jump not in jump_cache:
-        with ui.Spinner(f"{name}: finding jump host {jump}"):
-            jump_cache[jump] = resolve_jump(profile, region, jump)
-    instance_id = jump_cache[jump]
+    instance_id = jump_cache[jump_for(block, name, target)]
+    if isinstance(instance_id, Exception):
+        raise instance_id            # this target's jump host never resolved
 
     if "eks" in target:
-        with ui.Spinner(f"{name}: resolving cluster {target['eks']}"):
-            host, port = eks_endpoint(profile, region, target["eks"]), 443
+        host, port = eks_endpoint(profile, region, target["eks"]), 443
     else:
         host, port = target["host"], int(target["port"])
 
-    local_port = pick_port(target.get("local_port"), key=key)
+    local_port = claim_port(target.get("local_port"), key)
     wanted = target.get("local_port")
     if wanted and local_port != wanted:
         holder = port_holder(wanted)
-        ui.warn(f"{name}: port {wanted} is busy"
-                + (f" ({holder})" if holder else "")
-                + f", using {local_port} instead")
+        report.warn(f"{name}: port {wanted} is busy"
+                    + (f" ({holder})" if holder else "")
+                    + f", using {local_port} instead")
 
     log_path = LOG_DIR / f"{config_name}-{name}.log"
     pid = start_session(profile, region, instance_id, host, port,
                         local_port, log_path)
 
-    with ui.Spinner(f"{name}: waiting for port {local_port}"):
-        opened = wait_for_port(local_port)
-    if not opened:
+    if not wait_for_port(local_port):
         terminate(pid)
+        # The local end is gone but AWS still has the session open. Close it
+        # here rather than leaving it for 'doctor' to find later.
+        terminate_session(profile, region, session_id_from_log(log_path))
         tail = log_path.read_text().strip().splitlines()[-5:]
         raise TunnelError(
             f"{name}: port {local_port} never opened.\n  " + "\n  ".join(tail)
@@ -519,31 +588,150 @@ def start_target(config_name, name, target, block, account, jump_cache,
         "started": time.time(),
     }
 
-    if terraform:
-        add_hosts_entry(host, key)
-        entry["hosts_entry"] = True
+    # Record it before anything else can go wrong: a failure in the kubeconfig
+    # patch below must not leave a live tunnel that nothing is tracking.
+    with _STATE_LOCK:
+        entries.append(entry)
+        save_state(entries)
+    remember_port(key, local_port)
 
     if "eks" in target:
         alias = f"tunnels-{config_name}-{name}"
-        update_kubeconfig(profile, region, target["eks"], alias)
-        write_kubeconfig_patch(alias, local_port, host)
-        entry["context"] = alias
-        ui.ok(f"{label} {ui.paint(':' + str(local_port), 'green', 'bold')} "
-              f"{ui.paint(ui.sym.dot, 'grey')} via {instance_id} "
-              f"{ui.paint(ui.sym.dot, 'grey')} context "
-              f"{ui.paint(alias, 'magenta')}")
+        # One kubeconfig file, several targets: serialise the rewrites, or
+        # two of them interleave and the file comes out mangled.
+        with _KUBECONFIG_LOCK:
+            update_kubeconfig(profile, region, target["eks"], alias)
+            write_kubeconfig_patch(alias, local_port, host)
+        with _STATE_LOCK:
+            entry["context"] = alias
+            save_state(entries)
+        report.ok(f"{label} {ui.paint(':' + str(local_port), 'green', 'bold')} "
+                  f"{ui.paint(ui.sym.dot, 'grey')} via {instance_id} "
+                  f"{ui.paint(ui.sym.dot, 'grey')} context "
+                  f"{ui.paint(alias, 'magenta')}")
     else:
-        ui.ok(f"{label} {ui.paint(':' + str(local_port), 'green', 'bold')} "
-              f"{ui.paint(ui.sym.arrow, 'grey')} {host}:{port} "
-              f"{ui.paint(ui.sym.dot, 'grey')} via {instance_id}")
+        report.ok(f"{label} {ui.paint(':' + str(local_port), 'green', 'bold')} "
+                  f"{ui.paint(ui.sym.arrow, 'grey')} {host}:{port} "
+                  f"{ui.paint(ui.sym.dot, 'grey')} via {instance_id}")
 
-    if terraform:
-        ui.ok(f"{label} /etc/hosts {host} {ui.sym.arrow} 127.0.0.1 "
-              f"(point terraform's port var at {local_port})")
 
-    entries.append(entry)
-    save_state(entries)
-    remember_port(key, local_port)
+def describe_failure(exc):
+    """One readable line for any exception, ours or not.
+
+    Anything raised while a target starts is caught, so this has to make
+    sense of failures that were never meant for the user - a kubeconfig the
+    aws CLI could not write, a permission error on a file - rather than
+    letting them end the whole run in a traceback.
+    """
+    if isinstance(exc, TunnelError):
+        return str(exc)
+    if isinstance(exc, subprocess.CalledProcessError):
+        detail = (exc.stderr or "").strip().splitlines()
+        program = exc.cmd[0] if isinstance(exc.cmd, (list, tuple)) else exc.cmd
+        return f"{program} failed: {detail[-1] if detail else exc}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+MAX_PARALLEL = 8
+
+
+def start_targets(config_name, pending, block, account, entries):
+    """Start several targets at once. Returns [(name, reason)] for failures.
+
+    Each target is an independent pair of AWS calls followed by a wait for
+    its port, so running them together turns N of those waits into roughly
+    one. Jump hosts are resolved first and shared: several targets usually
+    sit behind the same host, and looking it up once is both faster and
+    what the serial version did.
+    """
+    profile, region = block["profile"], block["region"]
+    jumps = sorted({jump_for(block, name, target) for name, target in pending})
+    reports = {name: ui.Report() for name, _ in pending}
+    jump_cache = {}
+    failures = {}
+    workers = min(MAX_PARALLEL, max(len(pending), len(jumps)))
+
+    plural = "s" if len(pending) > 1 else ""
+    with ui.Spinner(f"starting {len(pending)} target{plural}") as spinner:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            resolving = {pool.submit(resolve_jump, profile, region, j): j
+                         for j in jumps}
+            for future in as_completed(resolving):
+                jump = resolving[future]
+                try:
+                    jump_cache[jump] = future.result()
+                except Exception as exc:      # noqa: BLE001 - re-raised per target
+                    jump_cache[jump] = exc
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            starting = {
+                pool.submit(start_target, config_name, name, target, block,
+                            account, jump_cache, entries, reports[name]): name
+                for name, target in pending
+            }
+            for future in as_completed(starting):
+                name = starting[future]
+                done += 1
+                spinner.update(
+                    f"starting {len(pending)} target{plural} "
+                    f"{ui.sym.dot} {done}/{len(pending)}"
+                )
+                try:
+                    future.result()
+                except Exception as exc:      # noqa: BLE001 - one bad target
+                    failures[name] = describe_failure(exc)
+
+    # Print in config order, so a parallel run reads like a serial one.
+    for name, _target in pending:
+        reports[name].flush()
+        if name in failures:
+            ui.fail(f"{name}: {failures[name]}", stream=sys.stdout)
+    return [(name, failures[name]) for name, _ in pending if name in failures]
+
+
+def target_drift(entry, target):
+    """What a running tunnel no longer agrees with the config about.
+
+    'up' skips a target that is already running. Without this, editing a
+    target's cluster and running 'up' again silently keeps you pointed at
+    the old one.
+    """
+    if "eks" in target:
+        if entry.get("cluster") != target["eks"]:
+            return f"cluster is now {target['eks']}, tunnel has {entry.get('cluster')}"
+        return None
+    if entry.get("remote_host") != target.get("host"):
+        return f"host is now {target.get('host')}, tunnel has {entry.get('remote_host')}"
+    if entry.get("remote_port") != int(target["port"]):
+        return f"port is now {target['port']}, tunnel has {entry.get('remote_port')}"
+    return None
+
+
+def apply_hosts_entries(config_name, names, entries):
+    """Point the real hostnames at 127.0.0.1 for --terraform, one at a time.
+
+    Left until every tunnel is up, and never run from a worker thread: it
+    shells out to sudo, and parallel password prompts are unusable.
+    """
+    failures = []
+    for name in sorted(names):
+        key = f"{config_name}/{name}"
+        entry = next((e for e in entries if e["key"] == key), None)
+        if entry is None:
+            continue
+        label = ui.paint(name, "bright_cyan", "bold")
+        try:
+            add_hosts_entry(entry["remote_host"], key)
+        except TunnelError as exc:
+            failures.append((name, str(exc)))
+            ui.fail(f"{name}: {exc}", stream=sys.stdout)
+            continue
+        entry["hosts_entry"] = True
+        save_state(entries)
+        ui.ok(f"{label} /etc/hosts {entry['remote_host']} {ui.sym.arrow} 127.0.0.1 "
+              f"(point terraform's port var at {entry['local_port']})")
+    return failures
 
 
 def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None):
@@ -553,39 +741,33 @@ def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None)
     profile, region = block["profile"], block["region"]
 
     print(ui.rule(f"up {ui.paint(config_name, 'bold')}"))
-    with ui.Spinner(f"checking credentials for {profile}"):
-        account = ensure_sso(profile, region)
+    account = resolve_account(profile, region)
     ui.ok(f"account {ui.paint(account, 'bold')} "
           f"{ui.paint(ui.sym.dot, 'grey')} {profile} {ui.paint(ui.sym.dot, 'grey')} {region}")
 
-    jump_cache = {}
     entries = live_state()
-    running = {e["key"] for e in entries}
-    failures = []
+    running = {e["key"]: e for e in entries}
+    pending = []
 
     for name, target in sorted(targets.items()):
         key = f"{config_name}/{name}"
         label = ui.paint(name, "bright_cyan", "bold")
         if key in running:
             ui.step(f"{label} already up, skipping")
-            if terraform:
-                existing = next(e for e in entries if e["key"] == key)
-                add_hosts_entry(existing["remote_host"], key)
-                existing["hosts_entry"] = True
-                save_state(entries)
-                ui.ok(f"{label} /etc/hosts {existing['remote_host']} "
-                      f"{ui.sym.arrow} 127.0.0.1 "
-                      f"(point terraform's port var at {existing['local_port']})")
+            drift = target_drift(running[key], target)
+            if drift:
+                ui.warn(f"{name}: the config changed since it started - {drift}. "
+                        f"Run 'tunnels down {config_name} {name}' first to apply it.")
             continue
+        pending.append((name, target))
 
-        # One broken target must not cost you the working ones: keep going and
-        # report every failure together at the end.
-        try:
-            start_target(config_name, name, target, block, account,
-                         jump_cache, entries, terraform)
-        except TunnelError as exc:
-            failures.append((name, str(exc)))
-            ui.fail(f"{name}: {exc}", stream=sys.stdout)
+    # One broken target must not cost you the working ones: every failure is
+    # caught, collected, and reported together at the end.
+    failures = start_targets(config_name, pending, block, account, entries) \
+        if pending else []
+
+    if terraform:
+        failures += apply_hosts_entries(config_name, targets, entries)
 
     if block.get("hud"):
         start_hud()
@@ -676,7 +858,7 @@ def cmd_status():
     rows = []
     for entry in sorted(entries, key=lambda e: e["key"]):
         where = entry["cluster"] or f"{entry['remote_host']}:{entry['remote_port']}"
-        healthy = not port_is_free(entry["local_port"])
+        healthy = health.port_answers(entry["local_port"], timeout=0.5)
         rows.append([
             ui.paint(ui.sym.up, "green" if healthy else "red"),
             ui.paint(entry["key"], "bright_cyan", "bold"),

@@ -6,37 +6,53 @@ around holding the port with nothing behind it. This watchdog force-closes
 any tunnel whose port stops accepting connections, and any tunnel older
 than its ttl, regardless of port health.
 
+A tunnel has to fail STRIKES checks in a row before it is closed. One
+missed check means very little: switching wifi, or waking the laptop, drops
+every connection for a moment, and closing healthy tunnels because of a
+blip is worse than leaving a dead one around for another minute.
+
 One process serves every tunnel, like keepalive. It reads the same state
 file the CLI does, and exits on its own once the last tunnel is gone.
 """
 
-import socket
 import sys
 import time
 
-from . import cli
+from . import cli, health
 
 CHECK_INTERVAL = 60
+STRIKES = 3
 
 
 def port_dead(port):
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=2):
-            return False
-    except OSError:
-        return True
+    return not health.port_answers(port)
 
 
-def sweep(ttl_seconds):
-    """Stop any entry that is dead or has outlived its ttl. Returns count stopped."""
+def sweep(ttl_seconds, strikes=None):
+    """Stop any entry that is dead or has outlived its ttl. Returns count stopped.
+
+    `strikes` carries the count of consecutive failed checks per tunnel
+    between sweeps. Pass None to close a dead tunnel on the first failure,
+    which is what a one-shot sweep wants.
+    """
     entries = cli.live_state()
     now = time.time()
     stopped = 0
     for entry in entries:
+        key = entry["key"]
         if port_dead(entry.get("local_port")):
-            cli.stop_entry(entry, reason="port went dead")
-            stopped += 1
-        elif ttl_seconds and now - entry["started"] > ttl_seconds:
+            missed = 1 if strikes is None else strikes.get(key, 0) + 1
+            if strikes is not None:
+                strikes[key] = missed
+            if missed >= (1 if strikes is None else STRIKES):
+                cli.stop_entry(entry, reason=f"port dead for {missed} checks")
+                stopped += 1
+                if strikes is not None:
+                    strikes.pop(key, None)
+            continue
+        if strikes is not None:
+            strikes.pop(key, None)      # answered again, forget the misses
+        if ttl_seconds and now - entry["started"] > ttl_seconds:
             cli.stop_entry(entry, reason="ttl expired")
             stopped += 1
     return stopped
@@ -44,10 +60,11 @@ def sweep(ttl_seconds):
 
 def run(ttl_minutes, interval=CHECK_INTERVAL):
     ttl_seconds = ttl_minutes * 60 if ttl_minutes else None
+    strikes = {}
     while True:
         if not cli.live_state():
             return 0
-        sweep(ttl_seconds)
+        sweep(ttl_seconds, strikes)
         time.sleep(interval)
 
 

@@ -6,6 +6,34 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `tunnels up` starts a config block's targets in parallel instead of one
+  after another, so an environment with several clusters comes up in about
+  the time one used to take. Output is still printed in config order.
+  Breaking: no.
+- `up` warns when a target is already running but the config has changed
+  underneath it, instead of silently skipping and leaving you pointed at
+  the old cluster. Breaking: no.
+
+### Fixed
+- A failure that was not a `TunnelError` - a kubeconfig the aws CLI could
+  not write, a permission error - ended the whole `up` in a traceback and
+  skipped every remaining target. Every failure is now caught per target
+  and reported in the summary.
+- A tunnel whose kubeconfig patch failed was left running with nothing
+  tracking it. The state entry is now recorded as soon as the port opens.
+- `status`, the floating label and the watchdog each decided "is this
+  tunnel alive?" differently, so a session that died AWS-side showed green
+  in the label and red in `status`. All three now use one connect-based
+  check.
+- The watchdog closed a tunnel on a single missed check, so a wifi switch
+  or a laptop waking up could take down healthy tunnels. It now needs three
+  consecutive misses.
+- `aws sso login` printed its browser prompt underneath a running spinner.
+  The spinner now covers only the cached-token probe.
+- A target whose port never opened left its AWS session open for `doctor`
+  to find later; it is closed straight away.
+
 ## [0.8.0] - 2026-09-03
 
 ### Added

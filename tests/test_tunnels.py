@@ -5,6 +5,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -732,17 +733,14 @@ def _hud():
 
     if "tunnels_cli.hud" in sys.modules:
         return sys.modules["tunnels_cli.hud"]
-    cocoa = types.ModuleType("Cocoa")
-    for name in (
-        "NSApplication", "NSApplicationActivationPolicyAccessory",
-        "NSBackingStoreBuffered", "NSBezierPath", "NSColor", "NSFont",
-        "NSMakeRect", "NSObject", "NSScreen", "NSTextField", "NSTimer",
-        "NSView", "NSWindow", "NSAttributedString", "NSFontAttributeName",
-        "NSWindowCollectionBehaviorCanJoinAllSpaces",
-        "NSWindowCollectionBehaviorFullScreenAuxiliary",
-        "NSWindowCollectionBehaviorStationary", "NSWindowStyleMaskBorderless",
-    ):
-        setattr(cocoa, name, object)
+    # Answer any NSSomething the module imports. A fixed list of names went
+    # stale every time hud.py imported one more, and took these tests red
+    # with it.
+    class _Cocoa(types.ModuleType):
+        def __getattr__(self, name):
+            return object
+
+    cocoa = _Cocoa("Cocoa")
     objc = types.ModuleType("objc")
     objc.super = super
     objc.python_method = lambda f: f
@@ -1009,6 +1007,16 @@ def test_status_subcommand_reaches_cmd_status(monkeypatch):
     assert called == [True]
 
 
+def _stub_up(monkeypatch, tmp_path, config):
+    """Neutralise everything cmd_up touches outside the target loop."""
+    monkeypatch.setattr(tunnels, "load_config", lambda: config)
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(tunnels, "resolve_account", lambda profile, region: "1234")
+    monkeypatch.setattr(tunnels, "start_hud", lambda: None)
+    monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
+    return []
+
+
 def test_cmd_up_keeps_going_when_one_target_fails(tmp_path, monkeypatch, capsys):
     """A broken target must not cost you the working ones."""
     config = {
@@ -1017,12 +1025,7 @@ def test_cmd_up_keeps_going_when_one_target_fails(tmp_path, monkeypatch, capsys)
             "targets": {"good": {"eks": "c1"}, "bad": {"eks": "c2"}},
         }
     }
-    started = []
-    monkeypatch.setattr(tunnels, "load_config", lambda: config)
-    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(tunnels, "ensure_sso", lambda profile, region: "1234")
-    monkeypatch.setattr(tunnels, "start_hud", lambda: None)
-    monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
+    started = _stub_up(monkeypatch, tmp_path, config)
 
     def fake_start(config_name, name, target, *args, **kwargs):
         if name == "bad":
@@ -1032,10 +1035,195 @@ def test_cmd_up_keeps_going_when_one_target_fails(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(tunnels, "start_target", fake_start)
 
     assert tunnels.cmd_up("dev", []) == 1        # a failure is still an error
-    assert started == ["good"]                   # ...but 'good' came up first
+    assert started == ["good"]                   # ...but 'good' still came up
     out = capsys.readouterr().out
     assert "no running instance" in out
     assert "1 of 2 target(s) failed: bad" in out
+
+
+def test_cmd_up_survives_a_failure_that_is_not_a_tunnel_error(tmp_path, monkeypatch, capsys):
+    """A kubeconfig write that blows up must not end the whole run.
+
+    Everything after 'start_session' can raise something that was never
+    meant for the user - CalledProcessError, OSError - and those used to
+    escape 'up' entirely as a traceback, skipping every remaining target.
+    """
+    config = {
+        "dev": {
+            "profile": "p", "region": "r", "jump": "i-0",
+            "targets": {"good": {"eks": "c1"}, "bad": {"eks": "c2"}},
+        }
+    }
+    started = _stub_up(monkeypatch, tmp_path, config)
+
+    def fake_start(config_name, name, target, *args, **kwargs):
+        if name == "bad":
+            raise OSError(13, "Permission denied", "/Users/x/.kube/config")
+        started.append(name)
+
+    monkeypatch.setattr(tunnels, "start_target", fake_start)
+
+    assert tunnels.cmd_up("dev", []) == 1
+    assert started == ["good"]
+    out = capsys.readouterr().out
+    assert "Permission denied" in out
+    assert "1 of 2 target(s) failed: bad" in out
+
+
+def test_cmd_up_warns_when_a_running_tunnel_no_longer_matches_the_config(
+    tmp_path, monkeypatch, capsys
+):
+    """'already up, skipping' must not hide a config change silently."""
+    config = {
+        "dev": {
+            "profile": "p", "region": "r", "jump": "i-0",
+            "targets": {"argo": {"eks": "new-cluster"}},
+        }
+    }
+    _stub_up(monkeypatch, tmp_path, config)
+    entry = _entry(key="dev/argo", pid=os.getpid())
+    entry["cluster"] = "old-cluster"
+    tunnels.save_state([entry])
+
+    assert tunnels.cmd_up("dev", []) == 0
+    out = capsys.readouterr().out
+    assert "already up, skipping" in out
+    assert "new-cluster" in out and "old-cluster" in out
+
+
+def test_target_drift_is_quiet_when_the_config_still_matches():
+    entry = {"cluster": "c1", "remote_host": "h", "remote_port": 5432}
+    assert tunnels.target_drift(entry, {"eks": "c1"}) is None
+    assert tunnels.target_drift(entry, {"host": "h", "port": 5432}) is None
+    assert tunnels.target_drift(entry, {"host": "h", "port": 5433}) is not None
+
+
+def test_cmd_up_starts_targets_in_parallel(tmp_path, monkeypatch, capsys):
+    """Four slow targets must take about as long as one, not four."""
+    import threading as th
+
+    config = {
+        "dev": {
+            "profile": "p", "region": "r", "jump": "i-0",
+            "targets": {n: {"eks": f"c-{n}"} for n in ("a", "b", "c", "d")},
+        }
+    }
+    _stub_up(monkeypatch, tmp_path, config)
+    peak = [0]
+    running = [0]
+    lock = th.Lock()
+
+    def slow_start(config_name, name, target, *args, **kwargs):
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        time.sleep(0.2)
+        with lock:
+            running[0] -= 1
+
+    monkeypatch.setattr(tunnels, "start_target", slow_start)
+
+    began = time.monotonic()
+    assert tunnels.cmd_up("dev", []) == 0
+    elapsed = time.monotonic() - began
+    assert peak[0] == 4, "targets ran one after another"
+    assert elapsed < 0.6, f"4 x 0.2s of work took {elapsed:.2f}s"
+
+
+def test_start_targets_reports_a_jump_host_failure_per_target(tmp_path, monkeypatch, capsys):
+    """One unresolvable jump host fails only the targets that use it."""
+    block = {
+        "profile": "p", "region": "r",
+        "targets": {"a": {"eks": "c1", "jump": "tag:Name=gone"},
+                    "b": {"eks": "c2", "jump": "i-fine"}},
+    }
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+
+    def fake_resolve(profile, region, jump):
+        if jump == "tag:Name=gone":
+            raise tunnels.TunnelError("no running instance with tag Name=gone")
+        return "i-fine"
+
+    monkeypatch.setattr(tunnels, "resolve_jump", fake_resolve)
+    monkeypatch.setattr(tunnels, "start_session", lambda *a, **k: os.getpid())
+    monkeypatch.setattr(tunnels, "wait_for_port", lambda port, timeout=20: True)
+    monkeypatch.setattr(tunnels, "eks_endpoint", lambda *a: "eks.example.com")
+    monkeypatch.setattr(tunnels, "update_kubeconfig", lambda *a: None)
+    monkeypatch.setattr(tunnels, "write_kubeconfig_patch", lambda *a: None)
+    monkeypatch.setattr(tunnels, "remember_port", lambda *a: None)
+
+    pending = [("a", block["targets"]["a"]), ("b", block["targets"]["b"])]
+    entries = []
+    failures = tunnels.start_targets("dev", pending, block, "1234", entries)
+
+    assert [name for name, _ in failures] == ["a"]
+    assert [e["target"] for e in entries] == ["b"]
+
+
+def test_start_target_records_the_entry_before_patching_the_kubeconfig(
+    tmp_path, monkeypatch
+):
+    """A tunnel that is up must be in the state file even if the rest fails.
+
+    Otherwise the process keeps holding its port with nothing tracking it,
+    and only 'doctor' ever finds it.
+    """
+    block = {"profile": "p", "region": "r", "jump": "i-0",
+             "targets": {"argo": {"eks": "c1"}}}
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(tunnels, "start_session", lambda *a, **k: os.getpid())
+    monkeypatch.setattr(tunnels, "wait_for_port", lambda port, timeout=20: True)
+    monkeypatch.setattr(tunnels, "eks_endpoint", lambda *a: "eks.example.com")
+    monkeypatch.setattr(tunnels, "remember_port", lambda *a: None)
+
+    def boom(*args, **kwargs):
+        raise tunnels.TunnelError("kubeconfig is read-only")
+
+    monkeypatch.setattr(tunnels, "update_kubeconfig", boom)
+
+    entries = []
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.start_target("dev", "argo", block["targets"]["argo"], block,
+                             "1234", {"i-0": "i-0"}, entries, ui.Report())
+
+    assert [e["key"] for e in entries] == ["dev/argo"]
+    assert [e["key"] for e in tunnels.load_state()] == ["dev/argo"]
+
+
+def test_start_target_closes_the_aws_session_when_the_port_never_opens(
+    tmp_path, monkeypatch
+):
+    """Killing the local process leaves the AWS session Connected otherwise."""
+    block = {"profile": "p", "region": "r", "jump": "i-0",
+             "targets": {"argo": {"host": "db.example.com", "port": 5432}}}
+    closed = []
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(tunnels, "LOG_DIR", tmp_path / "logs")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "dev-argo.log").write_text(
+        "Starting session with SessionId: sess-123\nplugin gave up\n"
+    )
+    monkeypatch.setattr(tunnels, "start_session", lambda *a, **k: 999999)
+    monkeypatch.setattr(tunnels, "wait_for_port", lambda port, timeout=20: False)
+    monkeypatch.setattr(tunnels, "terminate", lambda pid, timeout=5: True)
+    monkeypatch.setattr(
+        tunnels, "terminate_session",
+        lambda profile, region, sid: closed.append(sid) or True,
+    )
+
+    with pytest.raises(tunnels.TunnelError, match="never opened"):
+        tunnels.start_target("dev", "argo", block["targets"]["argo"], block,
+                             "1234", {"i-0": "i-0"}, [], ui.Report())
+
+    assert closed == ["sess-123"]
+
+
+def test_pick_port_skips_a_port_another_target_already_holds():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert tunnels.pick_port(free) == free
+    assert tunnels.pick_port(free, taken={free}) != free
 
 
 def test_banner_falls_back_to_letters_only_when_narrow(monkeypatch):
@@ -1080,3 +1268,53 @@ def test_cmd_interactive_ctrl_c_at_target_step_stops(monkeypatch):
                         lambda *a, **k: pytest.fail("should not start a tunnel"))
 
     assert tunnels.cmd_interactive() == 0
+
+
+def test_port_answers_is_the_one_health_check():
+    """status, the hud and the watchdog must not disagree about 'alive'."""
+    from tunnels_cli import health
+
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        assert health.port_answers(port, timeout=0.5) is True
+    assert health.port_answers(port, timeout=0.5) is False
+    assert health.port_answers(None) is False
+
+
+def test_watchdog_needs_several_misses_before_closing_a_tunnel(tmp_path, monkeypatch):
+    """A wifi switch drops every port for a moment. That must not close them."""
+    from tunnels_cli import watchdog
+
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    tunnels.save_state([_entry(pid=os.getpid(), local_port=dead_port)])
+    stopped = []
+    monkeypatch.setattr(tunnels, "stop_entry",
+                        lambda entry, reason=None: stopped.append(reason) or True)
+
+    strikes = {}
+    for _ in range(watchdog.STRIKES - 1):
+        assert watchdog.sweep(None, strikes) == 0
+    assert stopped == []
+    assert watchdog.sweep(None, strikes) == 1
+    assert "3 checks" in stopped[0]
+
+
+def test_watchdog_forgets_the_misses_once_a_port_answers_again(tmp_path, monkeypatch):
+    from tunnels_cli import watchdog
+
+    monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(tunnels, "stop_entry",
+                        lambda entry, reason=None: pytest.fail("closed a live tunnel"))
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        tunnels.save_state([_entry(pid=os.getpid(), local_port=port)])
+        strikes = {"dev/argo": watchdog.STRIKES - 1}
+        assert watchdog.sweep(None, strikes) == 0
+        assert strikes == {}

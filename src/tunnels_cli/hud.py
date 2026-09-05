@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Floating label showing the live tunnels. Draws over fullscreen apps.
 
-Run with /usr/bin/python3: it is the interpreter that has pyobjc here.
+Started by the CLI as `<its own python> -m tunnels_cli.hud`, so it runs in
+the same environment and finds pyobjc there.
 System Tk is broken on macOS 26, so this uses a native borderless NSWindow
 instead. The window joins every Space and is marked fullScreenAuxiliary, so
 it stays visible while another app is fullscreen. It ignores mouse events,
@@ -12,7 +13,6 @@ Reads ~/.tunnels/state.json every 2 seconds and quits when it is empty.
 
 import json
 import math
-import os
 import zlib
 from pathlib import Path
 
@@ -40,6 +40,8 @@ from Cocoa import (
     NSWindowCollectionBehaviorStationary,
     NSWindowStyleMaskBorderless,
 )
+
+from tunnels_cli.health import port_answers
 
 STATE_FILE = Path.home() / ".tunnels" / "state.json"
 POLL_SECONDS = 2.0
@@ -110,19 +112,6 @@ def assign_colors(keys):
     return {key: PALETTE[slot] for key, slot in taken.items()}
 
 
-def pid_alive(pid):
-    """EPERM means the process exists but is not ours. That still counts."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, TypeError):
-        return False
-    return True
-
-
 def read_entries():
     try:
         with STATE_FILE.open() as handle:
@@ -137,7 +126,9 @@ def lines_for(entries):
     rows = []
     colors = assign_colors(e["key"] for e in entries)
     for entry in sorted(entries, key=lambda e: e["key"]):
-        live = pid_alive(entry.get("pid"))
+        # Same check status and the watchdog use: a live pid means nothing
+        # once the AWS side of the session has gone away.
+        live = port_answers(entry.get("local_port"), timeout=0.4)
         account = str(entry.get("account", "?"))[-4:]
         text = (
             f"{'●' if live else '○'} {entry['config']}/{entry['target']} "
