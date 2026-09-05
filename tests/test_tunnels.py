@@ -1,5 +1,6 @@
 """Unit tests for the pure helpers in `tunnels`. No AWS, no network."""
 
+import json
 import io
 import os
 import re
@@ -1537,3 +1538,251 @@ def test_picker_all_row_wins_over_a_target_actually_named_all(monkeypatch):
                   entries=[_live("dev/all", target="all")])
     assert out["up"] == [("dev", [])]
     assert out["down"] == []
+
+
+from tunnels_cli import update as updater  # noqa: E402
+
+
+def test_parse_version_ignores_a_leading_v_and_short_forms():
+    assert updater.parse_version("v1.2.3") == (1, 2, 3)
+    assert updater.parse_version("1.2.3") == (1, 2, 3)
+    assert updater.parse_version("v0.9") == (0, 9, 0)
+    assert updater.parse_version("1.0") == updater.parse_version("v1.0.0")
+    # "dev" - running from a checkout with no install - must lose to
+    # anything real rather than crash or win.
+    assert updater.parse_version("dev") < updater.parse_version("v0.0.1")
+    assert updater.parse_version("release-999") == ()
+
+
+def test_latest_release_reads_the_tag_and_the_notes_url(monkeypatch):
+    payload = json.dumps({"tag_name": "v1.4.0",
+                          "html_url": "https://github.com/o/r/releases/tag/v1.4.0"})
+    monkeypatch.setattr(updater, "_fetch", lambda url, timeout: payload)
+    assert updater.latest_release() == (
+        "v1.4.0", "https://github.com/o/r/releases/tag/v1.4.0")
+
+
+def test_latest_release_turns_a_network_failure_into_one_clean_error(monkeypatch):
+    def boom(url, timeout):
+        raise OSError("nodename nor servname provided")
+
+    monkeypatch.setattr(updater, "_fetch", boom)
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.latest_release()
+    assert "nodename" in str(exc.value)
+
+
+@pytest.mark.parametrize("payload", [
+    "[]",
+    '{"tag_name": 123}',
+    '{"tag_name": "release-999"}',
+])
+def test_latest_release_rejects_a_malformed_response(monkeypatch, payload):
+    monkeypatch.setattr(updater, "_fetch", lambda url, timeout: payload)
+    with pytest.raises(updater.UpdateError, match="invalid release"):
+        updater.latest_release()
+
+
+def test_source_checkout_only_recognises_its_own_source_tree(tmp_path, monkeypatch):
+    other = tmp_path / "other-project"
+    (other / ".git").mkdir(parents=True)
+    installed = other / ".venv/lib/python/site-packages/tunnels_cli/update.py"
+    monkeypatch.setattr(updater, "__file__", str(installed))
+    assert updater.source_checkout() is None
+
+    repo = tmp_path / "tunnels"
+    (repo / ".git").mkdir(parents=True)
+    source = repo / "src/tunnels_cli/update.py"
+    source.parent.mkdir(parents=True)
+    source.touch()
+    monkeypatch.setattr(updater, "__file__", str(source))
+    assert updater.source_checkout() == repo
+
+
+def test_update_reports_a_lookup_failure_as_a_tunnel_error(monkeypatch):
+    monkeypatch.setattr(tunnels, "_version", lambda: "0.9.0")
+
+    def boom():
+        raise updater.UpdateError("github said no")
+
+    monkeypatch.setattr(updater, "latest_release", boom)
+    with pytest.raises(tunnels.TunnelError):
+        tunnels.cmd_update()
+
+
+PIPX_GIT = {"venvs": {"tunnels-cli": {"metadata": {"main_package": {
+    "package": "tunnels-cli", "pip_args": [],
+    "package_or_url": "git+https://github.com/Zivgl66/tunnels.git"}}}}}
+PIPX_EDITABLE = {"venvs": {"tunnels-cli": {"metadata": {"main_package": {
+    "package": "tunnels-cli", "pip_args": ["--editable"],
+    "package_or_url": "/src/tunnels"}}}}}
+PIPX_LOCAL = {"venvs": {"tunnels-cli": {"metadata": {"main_package": {
+    "package": "tunnels-cli", "pip_args": [],
+    "package_or_url": "/src/tunnels"}}}}}
+
+
+def test_install_method_recognises_a_pipx_install_from_the_git_url(monkeypatch):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: PIPX_GIT)
+    monkeypatch.setattr(updater, "source_checkout", lambda: None)
+    assert updater.install_method() == updater.Install("git", None)
+
+
+def test_install_method_recognises_an_editable_checkout(monkeypatch):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: PIPX_EDITABLE)
+    monkeypatch.setattr(updater, "source_checkout", lambda: Path("/src/tunnels"))
+    assert updater.install_method() == updater.Install("editable", Path("/src/tunnels"))
+
+
+def test_install_method_recognises_a_local_non_editable_install(monkeypatch):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: PIPX_LOCAL)
+    monkeypatch.setattr(updater, "source_checkout", lambda: None)
+    assert updater.install_method() == updater.Install("local", Path("/src/tunnels"))
+
+
+@pytest.mark.parametrize("metadata", [
+    PIPX_GIT,
+    {"venvs": {"tunnels-cli": {"metadata": {"main_package": {
+        "package": "tunnels-cli", "pip_args": ["--editable"],
+        "package_or_url": "/somewhere/else"}}}}},
+])
+def test_install_method_prefers_the_checkout_that_is_running(monkeypatch, metadata):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: metadata)
+    monkeypatch.setattr(updater, "source_checkout", lambda: Path("/src/tunnels"))
+    assert updater.install_method() == updater.Install("checkout", Path("/src/tunnels"))
+
+
+def test_install_method_rejects_a_relative_pipx_source(monkeypatch):
+    metadata = {"venvs": {"tunnels-cli": {"metadata": {"main_package": {
+        "package": "tunnels-cli", "pip_args": [], "package_or_url": "."}}}}}
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: metadata)
+    monkeypatch.setattr(updater, "source_checkout", lambda: None)
+    assert updater.install_method() == updater.Install("unknown", None)
+
+
+def test_install_method_falls_back_to_the_checkout_when_pipx_is_absent(monkeypatch):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: None)
+    monkeypatch.setattr(updater, "source_checkout", lambda: Path("/src/tunnels"))
+    assert updater.install_method() == updater.Install("checkout", Path("/src/tunnels"))
+
+
+def test_install_method_gives_up_when_it_can_recognise_nothing(monkeypatch):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: None)
+    monkeypatch.setattr(updater, "source_checkout", lambda: None)
+    assert updater.install_method() == updater.Install("unknown", None)
+
+
+@pytest.mark.parametrize("metadata", [
+    [{}],
+    {"venvs": [{}]},
+    {"venvs": {"tunnels-cli": {"metadata": [{}]}}},
+])
+def test_install_method_gives_up_on_malformed_pipx_metadata(monkeypatch, metadata):
+    monkeypatch.setattr(updater, "_pipx_metadata", lambda: metadata)
+    monkeypatch.setattr(updater, "source_checkout", lambda: None)
+    assert updater.install_method() == updater.Install("unknown", None)
+
+
+def test_reinstall_turns_an_os_failure_into_one_clean_error(monkeypatch):
+    def denied(*args, **kwargs):
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr(updater.subprocess, "run", denied)
+    with pytest.raises(updater.UpdateError, match="could not run pipx"):
+        updater.reinstall()
+
+
+def _update(monkeypatch, install=None, current="0.9.0", tag="v1.0.0", tty=True,
+            answer="y", dirty=False, **kw):
+    ran = []
+    monkeypatch.setattr(tunnels, "_version", lambda: current)
+    monkeypatch.setattr(updater, "latest_release",
+                        lambda: (tag, f"https://github.com/o/r/releases/tag/{tag}"))
+    monkeypatch.setattr(updater, "install_method",
+                        lambda: install or updater.Install("git", None))
+    monkeypatch.setattr(updater, "is_dirty", lambda path: dirty)
+    monkeypatch.setattr(updater, "reinstall", lambda: ran.append("pipx") or 0)
+    monkeypatch.setattr(updater, "pull", lambda path: ran.append(f"pull:{path}") or 0)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: tty, raising=False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": answer)
+    return tunnels.cmd_update(**kw), ran
+
+
+def test_update_says_nothing_to_do_when_current(monkeypatch):
+    code, ran = _update(monkeypatch, current="1.0.0", tag="v1.0.0")
+    assert (code, ran) == (0, [])
+
+
+def test_update_treats_a_newer_local_build_as_current(monkeypatch):
+    code, ran = _update(monkeypatch, current="1.1.0", tag="v1.0.0")
+    assert (code, ran) == (0, [])
+
+
+def test_update_reinstalls_a_git_install(monkeypatch):
+    code, ran = _update(monkeypatch, install=updater.Install("git", None))
+    assert (code, ran) == (0, ["pipx"])
+
+
+def test_update_pulls_then_reinstalls_an_editable_pipx_install(monkeypatch):
+    # Editable source changes immediately, but its installed version metadata
+    # and dependencies only refresh when pipx reinstalls it.
+    code, ran = _update(monkeypatch,
+                        install=updater.Install("editable", Path("/src/tunnels")))
+    assert (code, ran) == (0, ["pull:/src/tunnels", "pipx"])
+
+
+def test_update_only_pulls_a_checkout_without_a_pipx_install(monkeypatch):
+    code, ran = _update(monkeypatch,
+                        install=updater.Install("checkout", Path("/src/tunnels")))
+    assert (code, ran) == (0, ["pull:/src/tunnels"])
+
+
+def test_update_pulls_then_reinstalls_a_local_non_editable_install(monkeypatch):
+    # Not editable: the venv holds a copy, so new code needs both steps.
+    code, ran = _update(monkeypatch,
+                        install=updater.Install("local", Path("/src/tunnels")))
+    assert (code, ran) == (0, ["pull:/src/tunnels", "pipx"])
+
+
+def test_update_refuses_to_pull_over_uncommitted_changes(monkeypatch, capsys):
+    code, ran = _update(monkeypatch, dirty=True,
+                        install=updater.Install("editable", Path("/src/tunnels")))
+    assert ran == [], "must not touch a dirty working tree"
+    assert code == 1
+    assert "uncommitted" in capsys.readouterr().out
+
+
+def test_update_stops_if_the_pull_fails_rather_than_reinstalling(monkeypatch):
+    ran = []
+    monkeypatch.setattr(tunnels, "_version", lambda: "0.9.0")
+    monkeypatch.setattr(updater, "latest_release", lambda: ("v1.0.0", "url"))
+    monkeypatch.setattr(updater, "install_method",
+                        lambda: updater.Install("local", Path("/src/tunnels")))
+    monkeypatch.setattr(updater, "is_dirty", lambda path: False)
+    monkeypatch.setattr(updater, "pull", lambda path: 1)
+    monkeypatch.setattr(updater, "reinstall", lambda: ran.append("pipx") or 0)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+
+    assert tunnels.cmd_update() == 1
+    assert ran == [], "a failed pull must not be followed by a reinstall"
+
+
+def test_update_tells_an_unrecognised_install_what_to_run(monkeypatch, capsys):
+    code, ran = _update(monkeypatch, install=updater.Install("unknown", None))
+    assert (code, ran) == (1, [])
+    assert "pipx install" in capsys.readouterr().out
+
+
+def test_update_does_nothing_when_the_user_declines(monkeypatch):
+    code, ran = _update(monkeypatch, answer="n")
+    assert (code, ran) == (1, [])
+
+
+def test_update_does_not_prompt_when_there_is_no_terminal(monkeypatch):
+    code, ran = _update(monkeypatch, tty=False)
+    assert (code, ran) == (1, [])
+
+
+def test_update_yes_skips_the_prompt_without_a_terminal(monkeypatch):
+    code, ran = _update(monkeypatch, tty=False, assume_yes=True)
+    assert (code, ran) == (0, ["pipx"])

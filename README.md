@@ -46,9 +46,9 @@ command per environment.**
   [how to install it](docs/agent-skill.md)
 - **build the config by asking AWS** — `tunnels discover <profile>` lists the
   clusters in an account and writes the block for you.
-- **small** — about 1,300 lines of Python over three files, `pyyaml` and
-  `pyobjc` its only dependencies. No agent, no container, no background
-  service beyond the tunnels themselves.
+- **small** — about 2,800 lines of Python, `pyyaml` and `pyobjc` its only
+  dependencies. No agent, no container, no background service beyond the
+  tunnels themselves.
 
 ```console
 $ tunnels up dev
@@ -94,10 +94,15 @@ prints the path on its own, so you can pipe it somewhere.
 Behind a TLS-inspecting proxy, put `UV_NATIVE_TLS=1` in front of the command so
 the installer trusts your system certificates.
 
-`tunnels --version` prints the installed version. To update: `pipx upgrade
-tunnels-cli` often no-ops on a git install, since pip sees the same URL and
-considers the requirement already satisfied. Use `pipx reinstall tunnels-cli`
-instead — it always pulls the latest `main`.
+`tunnels --version` prints the installed version. `tunnels update` checks
+GitHub for a newer release and offers to install it, working out how this
+copy was installed and acting accordingly — pipx installs are reinstalled,
+and local checkouts are fast-forwarded first. It never pulls over uncommitted
+changes.
+
+To do it by hand: `pipx upgrade tunnels-cli` often no-ops on a git install,
+since pip sees the same URL and considers the requirement already satisfied.
+Use `pipx reinstall tunnels-cli` instead — it always pulls the latest `main`.
 
 The tool itself is about 50 KB. The virtualenv comes to roughly 31 MB, and
 26 MB of that is `pyobjc`, which draws the floating label.
@@ -160,9 +165,11 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels hud` | Turn the floating label on or off |
 | `tunnels init` | Create and open the config file |
 | `tunnels config` | Open the existing config file. `--path` prints the path only |
+| `tunnels profiles` | List the accounts the config knows about |
 | `tunnels discover <profile>` | Build a config block by asking the account what it has |
 | `tunnels doctor` | Find leftover tunnels and AWS sessions. `--fix` cleans them up |
 | `tunnels logs <env> <target>` | Tail that tunnel's session log. `-f` follows it |
+| `tunnels update` | Check GitHub for a newer release and install it the way this copy was installed. `--yes` skips the prompt |
 
 `up` skips targets that are already running, so it is safe to repeat after you
 add a new one.

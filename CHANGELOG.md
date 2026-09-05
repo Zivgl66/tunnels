@@ -6,6 +6,18 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `tunnels update` checks GitHub for a newer release and installs it. What
+  "install it" means is read from pipx's own record rather than assumed:
+  remote pipx installs are reinstalled, local pipx installs are pulled and
+  reinstalled, and a checkout without pipx is only pulled. An unrecognised
+  install is told what to run instead of being guessed at. `--yes` skips the
+  prompt. Breaking: no.
+
+### Fixed
+- The README undercounted the project (it claimed 1,300 lines over three
+  files; it is about 2,800) and never documented `tunnels profiles`.
+
 ## [0.10.0] - 2026-09-05
 
 ### Added
