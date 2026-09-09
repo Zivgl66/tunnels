@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from tunnels_cli import health, ui, update as updater
+from tunnels_cli import awsauth, health, ui, update as updater
 from tunnels_cli.menu import BACK as menu_back
 from tunnels_cli.menu import menu
 
@@ -64,6 +64,15 @@ def config_block(config, name):
     for key in ("profile", "region", "targets"):
         if key not in block:
             raise TunnelError(f"config '{name}' is missing '{key}'")
+    spare = block.get("fallback_profile")
+    if spare is not None:
+        if not isinstance(spare, str) or not spare.strip():
+            raise TunnelError(
+                f"config '{name}': 'fallback_profile' must be a profile name")
+        if spare == block["profile"]:
+            raise TunnelError(
+                f"config '{name}': 'fallback_profile' is the same as "
+                f"'profile'. It is there to be tried when that one fails.")
     for target_name, target in block["targets"].items():
         validate_target(target_name, target)
         jump_for(block, target_name, target)   # raises if no jump applies
@@ -304,6 +313,75 @@ def patch_kubeconfig(kubeconfig, context_name, local_port, endpoint_host):
     raise TunnelError(f"kubeconfig has no cluster '{cluster_name}'")
 
 
+def kubeconfig_profiles(kubeconfig):
+    """{context name: AWS_PROFILE} for every context that pins one.
+
+    `aws eks update-kubeconfig --profile X` writes X into the user's exec
+    block, so a kubeconfig entry remembers which profile wrote it long after
+    the tunnel is gone. That is how a one-off fallback ends up pinning
+    kubectl to the credentials profile.
+    """
+    users = {}
+    for entry in kubeconfig.get("users") or []:
+        exec_block = ((entry.get("user") or {}).get("exec")) or {}
+        for var in exec_block.get("env") or []:
+            if var.get("name") == "AWS_PROFILE":
+                users[entry.get("name")] = var.get("value")
+    found = {}
+    for context in kubeconfig.get("contexts") or []:
+        user = (context.get("context") or {}).get("user")
+        if user in users:
+            found[context.get("name")] = users[user]
+    return found
+
+
+def stale_context_profiles(kubeconfig, config):
+    """Contexts this tool wrote that are pinned to the wrong profile.
+
+    Returns dicts carrying everything the fix needs, so nothing has to parse
+    the context name a second time. Only `tunnels-<block>-<target>` contexts
+    are considered; anything else in the kubeconfig belongs to somebody else
+    and is left alone.
+    """
+    pinned = kubeconfig_profiles(kubeconfig)
+    drifted = []
+    for context, profile in sorted(pinned.items()):
+        if not context.startswith("tunnels-"):
+            continue
+        rest = context[len("tunnels-"):]
+        # Block names may contain '-', so try every split rather than
+        # assuming the first one is the boundary.
+        for i, char in enumerate(rest):
+            if char != "-":
+                continue
+            block_name, target_name = rest[:i], rest[i + 1:]
+            block = config.get(block_name)
+            if not isinstance(block, dict):
+                continue
+            target = (block.get("targets") or {}).get(target_name)
+            if target is None:
+                continue
+            wanted = block.get("profile")
+            if wanted and wanted != profile:
+                drifted.append({
+                    "context": context, "pinned": profile, "wanted": wanted,
+                    "block": block_name, "target": target_name,
+                    "cluster": target.get("eks"), "region": block.get("region"),
+                })
+            break
+    return drifted
+
+
+def read_kubeconfig():
+    """The parsed kubeconfig, or None when there is not one to read."""
+    path = Path(os.environ.get("KUBECONFIG", Path.home() / ".kube" / "config"))
+    try:
+        with path.open() as handle:
+            return yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+
+
 def write_kubeconfig_patch(context_name, local_port, host):
     """Read ~/.kube/config, patch it, write it back."""
     path = Path(os.environ.get("KUBECONFIG", Path.home() / ".kube" / "config"))
@@ -343,9 +421,53 @@ def cached_account(profile):
     return json.loads(probe.stdout)["Account"]
 
 
-def sso_login(profile, region):
-    """Run the interactive login. Opens a browser and prints its own prompts."""
-    login = subprocess.run(["aws", "--profile", profile, "sso", "login"])
+#: A profile named "<primary>-creds" is used as a fallback with no config
+#: change. Naming it is the opt-in; there is nothing else to set.
+FALLBACK_SUFFIX = "-creds"
+
+
+def profile_settings(profile):
+    """One profile's block from ~/.aws/config, or {} if it is not there."""
+    return awsauth.profiles(awsauth.read_config()).get(profile, {})
+
+
+def conventional_fallback(profile, sections=None):
+    """'<profile>-creds', when it exists and can renew without a human.
+
+    Saves setting `fallback_profile` on every block by hand: creating the
+    profile is itself the opt-in. A profile that cannot renew unattended is
+    ignored, because falling back to a second thing that also wants a
+    browser buys nothing.
+    """
+    if not profile or profile.endswith(FALLBACK_SUFFIX):
+        return None
+    if sections is None:
+        sections = awsauth.read_config()
+    name = f"{profile}{FALLBACK_SUFFIX}"
+    body = awsauth.profiles(sections).get(name)
+    return name if body and awsauth.renews_without_a_human(body) else None
+
+
+def sso_login(profile, region, no_browser=None):
+    """Run the interactive login. Prints its own prompts.
+
+    The approval step is a human one and stays that way: the device
+    authorization grant exists precisely so that whatever holds the device
+    code cannot also grant consent. `no_browser` only changes *where* the
+    approval happens -- pasting the URL elsewhere instead of opening a local
+    browser -- which is what makes this work over SSH.
+    """
+    settings = profile_settings(profile)
+    if settings and not awsauth.can_sso_login(settings):
+        raise TunnelError(
+            f"profile '{profile}' does not use SSO "
+            f"({awsauth.auth_kind(settings)}), so 'aws sso login' cannot "
+            f"refresh it. Renew its credentials the way that profile expects."
+        )
+    cmd = ["aws", "--profile", profile, "sso", "login"]
+    if awsauth.headless() if no_browser is None else no_browser:
+        cmd.append("--no-browser")
+    login = subprocess.run(cmd)
     if login.returncode != 0:
         raise TunnelError(f"aws sso login failed for profile '{profile}'")
     return aws(profile, region, "sts", "get-caller-identity")["Account"]
@@ -360,8 +482,17 @@ def ensure_sso(profile, region):
     return sso_login(profile, region)
 
 
-def resolve_account(profile, region):
-    """ensure_sso, with a spinner over the part that is safe to cover.
+def resolve_account(profile, region, fallback=None):
+    """Work out which profile to actually use, and what account it reaches.
+
+    Returns (account id, profile to use). The second value matters: every
+    later AWS call, and the state entry that `down` and `doctor` read to
+    close the session, must name the profile that really opened the tunnel.
+
+    Order is deliberate. A valid cached token wins. Then `fallback_profile`,
+    if the block names one that can renew itself -- that is the whole point
+    of setting it, to get past an expired SSO token without a browser. Only
+    then does it fall through to an interactive login.
 
     Only the cached-token probe runs under the spinner: `aws sso login`
     opens a browser and prints prompts of its own, and a spinner thread
@@ -369,10 +500,39 @@ def resolve_account(profile, region):
     """
     with ui.Spinner(f"checking credentials for {profile}"):
         account = cached_account(profile)
+        settings = profile_settings(profile)
     if account:
-        return account
+        return account, profile
+
+    # An explicit fallback_profile wins; otherwise fall back on the naming
+    # convention, so a block needs no edit to gain one.
+    fallback = fallback or conventional_fallback(profile)
+
+    if fallback:
+        with ui.Spinner(f"trying fallback profile {fallback}"):
+            spare = cached_account(fallback)
+        if spare:
+            ui.warn(f"'{profile}' has no usable token, using '{fallback}' instead")
+            return spare, fallback
+        ui.warn(f"fallback profile '{fallback}' has no usable credentials either")
+
+    if settings and not awsauth.can_sso_login(settings):
+        # Nothing to log into. Say what kind of profile it is rather than
+        # running a login that cannot possibly help.
+        raise TunnelError(
+            f"profile '{profile}' ({awsauth.auth_kind(settings)}) has no "
+            f"working credentials, and 'aws sso login' does not apply to it. "
+            f"Renew it the way that profile expects, or set "
+            f"'fallback_profile' on this config block."
+        )
+
     ui.warn(f"sso token missing or expired for '{profile}', logging in")
-    return sso_login(profile, region)
+    if awsauth.auth_kind(settings) == awsauth.SSO_LEGACY:
+        # Worth saying every time: this browser trip is avoidable, and the
+        # user has no way to know that from the prompt aws prints.
+        ui.info("      this profile cannot refresh silently. "
+                "'tunnels auth --migrate' fixes that")
+    return sso_login(profile, region), profile
 
 
 def resolve_jump(profile, region, jump):
@@ -741,7 +901,12 @@ def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None)
     profile, region = block["profile"], block["region"]
 
     print(ui.rule(f"up {ui.paint(config_name, 'bold')}"))
-    account = resolve_account(profile, region)
+    account, profile = resolve_account(profile, region,
+                                       block.get("fallback_profile"))
+    # Everything downstream -- the eks lookup, the session, the state entry
+    # that 'down' closes it with -- has to use the profile that actually
+    # authenticated, not the one the config asked for first.
+    block = {**block, "profile": profile}
     ui.ok(f"account {ui.paint(account, 'bold')} "
           f"{ui.paint(ui.sym.dot, 'grey')} {profile} {ui.paint(ui.sym.dot, 'grey')} {region}")
 
@@ -1346,6 +1511,36 @@ def cmd_doctor(fix):
     else:
         ui.ok("no stray port forward processes")
 
+    # A tunnel that came up on a fallback profile leaves that profile written
+    # into the kubeconfig, and 'down' deliberately does not touch contexts.
+    # Left alone, kubectl keeps using the credentials profile after the SSO
+    # one is healthy again.
+    kubeconfig = read_kubeconfig()
+    try:
+        cfg_for_kube = load_config()
+    except TunnelError:
+        cfg_for_kube = {}
+    drifted = stale_context_profiles(kubeconfig, cfg_for_kube) if kubeconfig else []
+    if drifted:
+        problems += len(drifted)
+        ui.warn(f"{len(drifted)} kubectl context(s) pinned to a different "
+                f"profile than the config asks for")
+        for item in drifted:
+            ui.info(f"      {item['context']}: {item['pinned']} "
+                    f"{ui.sym.arrow} {item['wanted']}")
+        if fix:
+            for item in drifted:
+                if not item["cluster"]:
+                    continue      # only EKS targets have a kubeconfig entry
+                try:
+                    update_kubeconfig(item["wanted"], item["region"],
+                                      item["cluster"], item["context"])
+                    ui.ok(f"{item['context']} repointed at {item['wanted']}")
+                except TunnelError as exc:
+                    ui.warn(f"{item['context']}: could not repoint ({exc})")
+    elif kubeconfig is not None:
+        ui.ok("no kubectl contexts pinned to the wrong profile")
+
     ours = our_session_ids()
     live_ids = {e.get("session_id") for e in entries if e.get("session_id")}
     accounts = {}
@@ -1392,6 +1587,118 @@ def cmd_doctor(fix):
         ui.info("  run 'tunnels doctor --fix' to clean these up")
     elif not problems:
         ui.ok("nothing to clean up")
+    return 0
+
+
+def configured_profiles():
+    """Every profile named by the config, plus any live tunnel's, deduplicated."""
+    names = {e["profile"] for e in live_state() if e.get("profile")}
+    try:
+        config = load_config()
+    except TunnelError:
+        config = {}
+    for block in config.values():
+        if not isinstance(block, dict):
+            continue
+        for key in ("profile", "fallback_profile"):
+            if block.get(key):
+                names.add(block[key])
+    return sorted(names)
+
+
+def _token_line(status):
+    """How long a cached token has left, in words."""
+    if not status["found"]:
+        return "no cached token"
+    left = status["seconds_left"]
+    if left is None:
+        return "cached"
+    if left <= 0:
+        return "expired"
+    return f"{ui.human_age(left)} left"
+
+
+def cmd_auth(migrate=False, login=False, no_browser=False):
+    """Report how each profile authenticates, and cut down the browser trips.
+
+    The approval click itself is not removable -- see awsauth's docstring --
+    so what this offers instead is: stop needing it every eight hours, and
+    stop needing a local browser for it at all.
+    """
+    print(ui.rule("auth"))
+    sections = awsauth.read_config()
+    if not sections:
+        ui.warn(f"no aws config at {awsauth.AWS_CONFIG}")
+        return 1
+    known = awsauth.profiles(sections)
+    sessions = awsauth.sso_sessions(sections)
+    wanted = configured_profiles()
+
+    if not wanted:
+        ui.info("  no profiles in the tunnels config, showing all of ~/.aws/config")
+        wanted = sorted(known)
+
+    rows = []
+    legacy = 0
+    for name in wanted:
+        body = known.get(name)
+        if body is None:
+            rows.append([name, "missing", "-", "not in ~/.aws/config"])
+            continue
+        kind = awsauth.auth_kind(body)
+        status = awsauth.token_status(body, sessions)
+        if kind == awsauth.SSO_LEGACY:
+            legacy += 1
+            note = "browser again at expiry"
+        elif kind == awsauth.SSO_SESSION:
+            note = "refreshes silently" if status["refreshable"] else "log in once to arm refresh"
+        elif awsauth.renews_without_a_human(body):
+            note = "no browser, ever"
+        else:
+            note = "not an sso profile"
+        rows.append([name, kind, _token_line(status), note])
+
+    print(ui.table(["profile", "auth", "token", "note"], rows))
+
+    plan = awsauth.migration_plan(sections)
+    if not plan:
+        ui.ok("every sso profile can refresh without a browser")
+    else:
+        print()
+        ui.warn(f"{legacy} profile(s) use the legacy sso format and cannot refresh")
+        for group in plan:
+            ui.info(f"      [sso-session {group['session']}] would cover "
+                    f"{len(group['profiles'])} profile(s) at {group['start_url']}")
+        if not migrate:
+            ui.info("  run 'tunnels auth --migrate' to convert them "
+                    "(a backup is written first)")
+
+    if migrate and plan:
+        path = awsauth.AWS_CONFIG
+        backup = path.with_suffix(path.suffix + f".bak-{int(time.time())}")
+        text = path.read_text()
+        backup.write_text(text)
+        path.write_text(awsauth.apply_migration(text, plan))
+        ui.ok(f"migrated. previous config saved as {backup.name}")
+        ui.info("  the next login arms the refresh token; after that the "
+                "browser only opens when the sso session itself expires")
+
+    if login:
+        print()
+        for name in wanted:
+            body = known.get(name) or {}
+            if not awsauth.can_sso_login(body):
+                continue
+            if cached_account(name):
+                ui.ok(f"{name}: already valid")
+                continue
+            # One portal backs every profile here, so the first login usually
+            # satisfies the rest without a second browser trip.
+            region = body.get("sso_region") or profile_region(name)
+            sso_login(name, region, no_browser=no_browser or None)
+            ui.ok(f"{name}: logged in")
+
+    print(ui.rule())
     return 0
 
 
@@ -1481,6 +1788,8 @@ EPILOG = """examples:
   tunnels status               what is up right now
   tunnels logs dev api -f      follow one tunnel's session log
   tunnels down all             stop everything
+  tunnels auth                 how each profile logs in, and when it expires
+  tunnels auth --migrate       stop the browser opening every eight hours
 
 colour: off automatically when piped, or with --no-color / NO_COLOR=1
 """
@@ -1545,6 +1854,24 @@ def main(argv=None):
     doctor = sub.add_parser("doctor", help="find leftover tunnels and sessions")
     doctor.add_argument("--fix", action="store_true", help="clean up what it finds")
 
+    auth = sub.add_parser("auth", help="show how each profile logs in, and log in")
+    auth.add_argument(
+        "--migrate", action="store_true",
+        help="convert legacy sso profiles in ~/.aws/config to a shared "
+             "[sso-session] block, so the CLI can refresh them without a "
+             "browser. Writes a backup first",
+    )
+    auth.add_argument(
+        "--login", action="store_true",
+        help="log in now for any profile whose token has gone, so a later "
+             "'up' does not stop to ask",
+    )
+    auth.add_argument(
+        "--no-browser", action="store_true",
+        help="print the approval URL instead of opening a browser, for use "
+             "over ssh. Detected automatically when there is no display",
+    )
+
     disc = sub.add_parser("discover", help="build a config block from an account")
     disc.add_argument("profile", help="an SSO profile from ~/.aws/config")
     disc.add_argument("--region", help="defaults to the profile's region")
@@ -1581,6 +1908,8 @@ def main(argv=None):
             return cmd_init()
         if args.command == "doctor":
             return cmd_doctor(args.fix)
+        if args.command == "auth":
+            return cmd_auth(args.migrate, args.login, args.no_browser)
         if args.command == "discover":
             region = args.region or profile_region(args.profile)
             return cmd_discover(args.profile, region, args.name or args.profile)

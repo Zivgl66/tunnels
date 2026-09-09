@@ -29,6 +29,7 @@ dev:                                    # tunnels up dev
 | Key | Where | Required | Meaning |
 | --- | --- | --- | --- |
 | `profile` | block | yes | SSO profile from `~/.aws/config` |
+| `fallback_profile` | block | no | A second profile to use when `profile` has no usable token, so an expired SSO session does not stop the run to open a browser. A profile named `<primary>-creds` is picked up automatically without setting this |
 | `region` | block | yes | The account's region |
 | `jump` | block or target | yes, in one of the two | Instance id (`i-0abc...`) or tag lookup (`tag:Key=Value`) |
 | `hud` | block | no | `true` starts the floating label with the tunnels |

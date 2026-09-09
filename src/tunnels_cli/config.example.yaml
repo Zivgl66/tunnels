@@ -59,6 +59,13 @@
 
 dev:
   profile: CHANGEME-sso-profile
+  # Optional. Tried when the profile above has no usable token, before
+  # falling back to an interactive `aws sso login`. Point it at a profile
+  # that renews on its own -- credential_process, an assumed role, or
+  # static keys -- and an expired SSO session stops interrupting the run.
+  # 'tunnels auth' shows which of your profiles qualify.
+  #
+  # fallback_profile: CHANGEME-creds-profile
   region: eu-west-1
   jump: "tag:Name=CHANGEME-jump-server"
   hud: true

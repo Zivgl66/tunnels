@@ -1013,7 +1013,8 @@ def _stub_up(monkeypatch, tmp_path, config):
     """Neutralise everything cmd_up touches outside the target loop."""
     monkeypatch.setattr(tunnels, "load_config", lambda: config)
     monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(tunnels, "resolve_account", lambda profile, region: "1234")
+    monkeypatch.setattr(tunnels, "resolve_account",
+                        lambda profile, region, fallback=None: ("1234", profile))
     monkeypatch.setattr(tunnels, "start_hud", lambda: None)
     monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
     return []
@@ -1786,3 +1787,477 @@ def test_update_does_not_prompt_when_there_is_no_terminal(monkeypatch):
 def test_update_yes_skips_the_prompt_without_a_terminal(monkeypatch):
     code, ran = _update(monkeypatch, tty=False, assume_yes=True)
     assert (code, ran) == (0, ["pipx"])
+
+
+# --- aws auth: what the browser trip actually costs, and when it is avoidable
+
+
+from tunnels_cli import awsauth  # noqa: E402
+
+
+LEGACY_CONFIG = """\
+[default]
+region = eu-west-1
+
+[profile dev]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+region = eu-west-1
+
+# a comment the migration must not eat
+[profile prd]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_account_id = 444455556666
+sso_role_name = ReadOnly
+region = eu-west-1
+
+[profile robot]
+credential_process = /usr/local/bin/creds
+
+[profile legacy-keys]
+aws_access_key_id = AKIAEXAMPLE
+"""
+
+MODERN_CONFIG = """\
+[sso-session acme]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_registration_scopes = sso:account:access
+
+[profile dev]
+sso_session = acme
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+"""
+
+
+def _config(tmp_path, text):
+    path = tmp_path / "config"
+    path.write_text(text)
+    return path
+
+
+def test_auth_kind_reads_the_shape_not_the_name(tmp_path):
+    known = awsauth.profiles(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert awsauth.auth_kind(known["dev"]) == awsauth.SSO_LEGACY
+    assert awsauth.auth_kind(known["robot"]) == awsauth.PROCESS
+    assert awsauth.auth_kind(known["legacy-keys"]) == awsauth.STATIC
+    assert awsauth.auth_kind(known["default"]) == awsauth.UNKNOWN
+
+
+def test_sso_session_profiles_are_the_ones_that_refresh(tmp_path):
+    legacy = awsauth.profiles(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    modern = awsauth.profiles(awsauth.read_config(_config(tmp_path, MODERN_CONFIG)))
+    assert not awsauth.can_refresh_silently(legacy["dev"])
+    assert awsauth.can_refresh_silently(modern["dev"])
+
+
+def test_sso_login_is_meaningless_for_a_non_sso_profile(tmp_path):
+    known = awsauth.profiles(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert awsauth.can_sso_login(known["dev"])
+    assert not awsauth.can_sso_login(known["robot"])
+    assert not awsauth.can_sso_login(known["legacy-keys"])
+
+
+def test_migration_groups_every_profile_on_one_portal_into_one_session(tmp_path):
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert len(plan) == 1
+    assert plan[0]["session"] == "acme"
+    assert plan[0]["profiles"] == ["dev", "prd"]
+    assert plan[0]["start_url"] == "https://acme.awsapps.com/start"
+
+
+def test_migration_leaves_non_sso_and_already_migrated_profiles_alone(tmp_path):
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, MODERN_CONFIG)))
+    assert plan == []
+    legacy = awsauth.migration_plan(
+        awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert "robot" not in legacy[0]["profiles"]
+
+
+def test_two_portals_get_two_sessions_with_distinct_names(tmp_path):
+    text = LEGACY_CONFIG + """
+[profile other]
+sso_start_url = https://other.awsapps.com/start
+sso_region = us-east-1
+"""
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, text)))
+    assert {g["session"] for g in plan} == {"acme", "other"}
+
+
+def test_migration_reuses_a_session_block_for_the_same_portal(tmp_path):
+    text = MODERN_CONFIG + """
+[profile stragglers]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+"""
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, text)))
+    assert len(plan) == 1
+    assert plan[0]["session"] == "acme"
+    assert plan[0]["new_block"] is False
+
+
+def test_applying_the_migration_produces_a_config_aws_can_read(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, LEGACY_CONFIG))
+    plan = awsauth.migration_plan(sections)
+    out = awsauth.apply_migration(LEGACY_CONFIG, plan)
+
+    after = awsauth.read_config(_config(tmp_path, out))
+    known = awsauth.profiles(after)
+    assert awsauth.auth_kind(known["dev"]) == awsauth.SSO_SESSION
+    assert awsauth.auth_kind(known["prd"]) == awsauth.SSO_SESSION
+    assert awsauth.can_refresh_silently(known["dev"])
+    # the session block carries what the profiles gave up
+    session = awsauth.sso_sessions(after)["acme"]
+    assert session["sso_start_url"] == "https://acme.awsapps.com/start"
+    assert session["sso_registration_scopes"] == "sso:account:access"
+
+
+def test_migration_keeps_everything_it_was_not_asked_to_change(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, LEGACY_CONFIG))
+    out = awsauth.apply_migration(LEGACY_CONFIG, awsauth.migration_plan(sections))
+    assert "# a comment the migration must not eat" in out
+
+    known = awsauth.profiles(awsauth.read_config(_config(tmp_path, out)))
+    # account id and role are what pick the permission set -- losing either
+    # silently changes which credentials the profile hands out
+    assert known["dev"]["sso_account_id"] == "111122223333"
+    assert known["dev"]["sso_role_name"] == "AdministratorAccess"
+    assert known["prd"]["sso_role_name"] == "ReadOnly"
+    assert known["robot"]["credential_process"] == "/usr/local/bin/creds"
+    assert "sso_start_url" not in known["dev"]
+
+
+def test_migration_is_a_no_op_the_second_time(tmp_path):
+    once = awsauth.apply_migration(
+        LEGACY_CONFIG,
+        awsauth.migration_plan(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG))))
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, once)))
+    assert plan == []
+
+
+def test_token_status_reports_expiry_without_reading_the_token(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    body = {"sso_start_url": "https://acme.awsapps.com/start"}
+    name = awsauth._cache_path(body["sso_start_url"]).name
+    (cache / name).write_text(json.dumps({
+        "accessToken": "SECRET-MUST-NOT-BE-READ",
+        "expiresAt": "2026-01-01T12:00:00Z",
+    }))
+    now = time.mktime(time.strptime("2026-01-01 10:00:00", "%Y-%m-%d %H:%M:%S"))
+    status = awsauth.token_status(body, cache_dir=cache,
+                                  now=now - time.timezone)
+    assert status["found"] is True
+    assert status["refreshable"] is False
+    assert 7000 < status["seconds_left"] < 7400
+    assert "SECRET" not in json.dumps(status)
+
+
+def test_token_status_sees_a_refresh_token_on_a_migrated_profile(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    body = {"sso_session": "acme"}
+    sessions = {"acme": {"sso_start_url": "https://acme.awsapps.com/start"}}
+    (cache / awsauth._cache_path("acme").name).write_text(json.dumps({
+        "accessToken": "a", "refreshToken": "r", "expiresAt": "2026-01-01T12:00:00Z",
+    }))
+    status = awsauth.token_status(body, sessions, cache_dir=cache)
+    assert status["refreshable"] is True
+
+
+def test_token_status_is_blank_when_nothing_is_cached(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    status = awsauth.token_status({"sso_start_url": "https://nope/start"},
+                                  cache_dir=cache)
+    assert status == {"found": False, "expires_at": None,
+                      "seconds_left": None, "refreshable": False}
+
+
+def test_headless_detection_picks_ssh_and_bare_linux():
+    assert awsauth.headless({"SSH_CONNECTION": "1.2.3.4 1 5.6.7.8 22"})
+    assert awsauth.headless({"TUNNELS_NO_BROWSER": "1"})
+    assert not awsauth.headless({}) or sys.platform.startswith("linux")
+
+
+def test_login_refuses_a_profile_sso_cannot_help(monkeypatch):
+    monkeypatch.setattr(tunnels, "profile_settings",
+                        lambda profile: {"credential_process": "/bin/creds"})
+    ran = []
+    monkeypatch.setattr(tunnels.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.sso_login("robot", "eu-west-1")
+    assert "does not use SSO" in str(err.value)
+    assert ran == [], "must not shell out to aws sso login for a non-sso profile"
+
+
+def test_login_asks_for_no_browser_when_there_is_nowhere_to_open_one(monkeypatch):
+    seen = []
+
+    class Done:
+        returncode = 0
+
+    monkeypatch.setattr(tunnels, "profile_settings",
+                        lambda profile: {"sso_start_url": "https://acme/start"})
+    monkeypatch.setattr(tunnels.subprocess, "run",
+                        lambda cmd, **k: seen.append(cmd) or Done())
+    monkeypatch.setattr(tunnels, "aws",
+                        lambda *a, **k: {"Account": "111122223333"})
+
+    monkeypatch.setattr(tunnels.awsauth, "headless", lambda env=None: True)
+    assert tunnels.sso_login("dev", "eu-west-1") == "111122223333"
+    assert "--no-browser" in seen[0]
+
+    seen.clear()
+    monkeypatch.setattr(tunnels.awsauth, "headless", lambda env=None: False)
+    tunnels.sso_login("dev", "eu-west-1")
+    assert "--no-browser" not in seen[0]
+
+
+# --- credentials as a fallback when the sso token has run out
+
+
+def _resolve(monkeypatch, cached, kinds=None, login=None):
+    """Drive resolve_account with a fake credential probe per profile."""
+    kinds = kinds or {}
+    monkeypatch.setattr(tunnels, "cached_account", lambda p: cached.get(p))
+    monkeypatch.setattr(tunnels, "profile_settings", lambda p: kinds.get(p, {}))
+    monkeypatch.setattr(
+        tunnels, "sso_login",
+        login or (lambda p, r, no_browser=None: ("logged-in", p)[0]))
+    return tunnels
+
+
+SSO_BODY = {"sso_start_url": "https://acme.awsapps.com/start"}
+CREDS_BODY = {"credential_process": "/usr/local/bin/creds"}
+
+
+def test_a_valid_token_uses_the_profile_the_config_asked_for(monkeypatch):
+    _resolve(monkeypatch, {"primary": "111122223333"}, {"primary": SSO_BODY})
+    assert tunnels.resolve_account("primary", "eu-west-1") == \
+        ("111122223333", "primary")
+
+
+def test_fallback_is_used_when_the_sso_token_is_gone(monkeypatch):
+    calls = []
+    _resolve(monkeypatch, {"spare": "444455556666"},
+             {"primary": SSO_BODY, "spare": CREDS_BODY},
+             login=lambda p, r, no_browser=None: calls.append(p) or "nope")
+    account, used = tunnels.resolve_account("primary", "eu-west-1", "spare")
+    assert (account, used) == ("444455556666", "spare")
+    assert calls == [], "the browser must not open when a fallback works"
+
+
+def test_fallback_is_not_reached_while_the_primary_token_is_good(monkeypatch):
+    probed = []
+    monkeypatch.setattr(tunnels, "profile_settings", lambda p: SSO_BODY)
+    monkeypatch.setattr(tunnels, "cached_account",
+                        lambda p: probed.append(p) or ("111122223333"
+                                                       if p == "primary" else None))
+    assert tunnels.resolve_account("primary", "eu-west-1", "spare")[1] == "primary"
+    assert probed == ["primary"], "a working primary must not probe the fallback"
+
+
+def test_a_dead_fallback_still_falls_through_to_an_interactive_login(monkeypatch):
+    _resolve(monkeypatch, {}, {"primary": SSO_BODY, "spare": CREDS_BODY},
+             login=lambda p, r, no_browser=None: "111122223333")
+    assert tunnels.resolve_account("primary", "eu-west-1", "spare") == \
+        ("111122223333", "primary")
+
+
+def test_a_non_sso_primary_with_no_creds_says_so_instead_of_logging_in(monkeypatch):
+    calls = []
+    _resolve(monkeypatch, {}, {"primary": CREDS_BODY},
+             login=lambda p, r, no_browser=None: calls.append(p) or "x")
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.resolve_account("primary", "eu-west-1")
+    assert "does not apply" in str(err.value)
+    assert "fallback_profile" in str(err.value)
+    assert calls == []
+
+
+def test_the_fallback_profile_is_what_gets_recorded_and_used(monkeypatch, tmp_path):
+    """The state entry drives 'down' and 'doctor'. It must name the real one."""
+    seen = {}
+    block = {"profile": "primary", "fallback_profile": "spare",
+             "region": "eu-west-1", "jump": "i-0abc",
+             "targets": {"db": {"host": "h", "port": 5432}}}
+    monkeypatch.setattr(tunnels, "load_config", lambda: {"dev": block})
+    monkeypatch.setattr(tunnels, "resolve_account",
+                        lambda p, r, f=None: ("444455556666", "spare"))
+    monkeypatch.setattr(tunnels, "live_state", lambda: [])
+    monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
+    monkeypatch.setattr(
+        tunnels, "start_targets",
+        lambda cfg, pending, blk, account, entries: (
+            seen.update(profile=blk["profile"], account=account) or {}))
+
+    tunnels.cmd_up("dev", [])
+    assert seen["profile"] == "spare", \
+        "downstream calls must use the profile that authenticated"
+    assert seen["account"] == "444455556666"
+
+
+def test_config_rejects_a_fallback_that_is_the_same_as_the_profile():
+    bad = {"dev": {"profile": "p", "fallback_profile": "p", "region": "r",
+                   "jump": "i-0abc", "targets": {"db": {"host": "h", "port": 1}}}}
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.config_block(bad, "dev")
+    assert "same as" in str(err.value)
+
+
+def test_config_rejects_a_nonsense_fallback_value():
+    bad = {"dev": {"profile": "p", "fallback_profile": ["a"], "region": "r",
+                   "jump": "i-0abc", "targets": {"db": {"host": "h", "port": 1}}}}
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.config_block(bad, "dev")
+    assert "profile name" in str(err.value)
+
+
+def test_config_still_accepts_a_block_with_no_fallback():
+    ok = {"dev": {"profile": "p", "region": "r", "jump": "i-0abc",
+                  "targets": {"db": {"host": "h", "port": 1}}}}
+    assert tunnels.config_block(ok, "dev")["profile"] == "p"
+
+
+def test_profiles_that_renew_without_a_human_are_the_useful_fallbacks():
+    assert awsauth.renews_without_a_human(CREDS_BODY)
+    assert awsauth.renews_without_a_human({"role_arn": "arn:aws:iam::1:role/r"})
+    assert awsauth.renews_without_a_human({"aws_access_key_id": "AKIA"})
+    assert not awsauth.renews_without_a_human(SSO_BODY)
+    assert not awsauth.renews_without_a_human({"sso_session": "acme"})
+
+
+# --- the -creds convention, and kubeconfig left pinned to a fallback profile
+
+
+CONV_CONFIG = """\
+[profile dev]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+
+[profile dev-creds]
+aws_access_key_id = AKIAEXAMPLE
+aws_secret_access_key = shh
+region = eu-west-1
+
+[profile tst]
+sso_start_url = https://acme.awsapps.com/start
+
+[profile tst-creds]
+sso_start_url = https://acme.awsapps.com/start
+"""
+
+
+def test_a_creds_profile_is_picked_up_without_touching_the_config(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("dev", sections) == "dev-creds"
+
+
+def test_a_fallback_that_also_needs_a_browser_is_not_worth_having(tmp_path):
+    """tst-creds is itself an SSO profile, so it solves nothing."""
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("tst", sections) is None
+
+
+def test_no_creds_profile_means_no_convention_fallback(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("missing", sections) is None
+
+
+def test_a_creds_profile_does_not_look_for_its_own_creds_profile(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("dev-creds", sections) is None
+
+
+def test_resolve_uses_the_convention_when_no_fallback_is_configured(monkeypatch):
+    _resolve(monkeypatch, {"primary-creds": "444455556666"},
+             {"primary": SSO_BODY},
+             login=lambda p, r, no_browser=None: pytest.fail("should not log in"))
+    monkeypatch.setattr(tunnels, "conventional_fallback",
+                        lambda p, sections=None: f"{p}-creds")
+    assert tunnels.resolve_account("primary", "eu-west-1") == \
+        ("444455556666", "primary-creds")
+
+
+def test_an_explicit_fallback_beats_the_convention(monkeypatch):
+    _resolve(monkeypatch, {"chosen": "111122223333", "primary-creds": "999"},
+             {"primary": SSO_BODY})
+    monkeypatch.setattr(tunnels, "conventional_fallback",
+                        lambda p, sections=None: f"{p}-creds")
+    assert tunnels.resolve_account("primary", "eu-west-1", "chosen")[1] == "chosen"
+
+
+KUBECONFIG = {
+    "contexts": [
+        {"name": "tunnels-core-dev-eks-main",
+         "context": {"cluster": "c1", "user": "u1"}},
+        {"name": "tunnels-two-word-block-api",
+         "context": {"cluster": "c2", "user": "u2"}},
+        {"name": "someone-elses-context",
+         "context": {"cluster": "c3", "user": "u3"}},
+    ],
+    "users": [
+        {"name": "u1", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "core-dev-creds"}]}}},
+        {"name": "u2", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "two-word-profile"}]}}},
+        {"name": "u3", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "unrelated-creds"}]}}},
+    ],
+}
+
+KUBE_CONFIG_BLOCKS = {
+    "core-dev": {"profile": "core-dev", "region": "eu-west-1",
+                 "targets": {"eks-main": {"eks": "cluster-one"}}},
+    "two-word-block": {"profile": "two-word-profile", "region": "eu-west-1",
+                       "targets": {"api": {"eks": "cluster-two"}}},
+}
+
+
+def test_kubeconfig_profiles_reads_the_pin_out_of_the_exec_block():
+    found = tunnels.kubeconfig_profiles(KUBECONFIG)
+    assert found["tunnels-core-dev-eks-main"] == "core-dev-creds"
+    assert found["someone-elses-context"] == "unrelated-creds"
+
+
+def test_a_context_left_on_the_fallback_profile_is_reported():
+    drifted = tunnels.stale_context_profiles(KUBECONFIG, KUBE_CONFIG_BLOCKS)
+    assert len(drifted) == 1
+    item = drifted[0]
+    assert item["context"] == "tunnels-core-dev-eks-main"
+    assert (item["pinned"], item["wanted"]) == ("core-dev-creds", "core-dev")
+    # carried so the fix does not have to parse the context name again
+    assert (item["cluster"], item["region"]) == ("cluster-one", "eu-west-1")
+
+
+def test_a_context_on_the_right_profile_is_not_reported():
+    assert all(d["block"] != "two-word-block"
+               for d in tunnels.stale_context_profiles(KUBECONFIG, KUBE_CONFIG_BLOCKS))
+
+
+def test_contexts_this_tool_did_not_write_are_left_alone():
+    drifted = tunnels.stale_context_profiles(KUBECONFIG, KUBE_CONFIG_BLOCKS)
+    assert "someone-elses-context" not in [d["context"] for d in drifted]
+
+
+def test_block_names_containing_a_dash_still_resolve():
+    """'tunnels-two-word-block-api' must split at the right dash."""
+    kube = {
+        "contexts": [{"name": "tunnels-two-word-block-api",
+                      "context": {"cluster": "c", "user": "u"}}],
+        "users": [{"name": "u", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "stale"}]}}}],
+    }
+    drifted = tunnels.stale_context_profiles(kube, KUBE_CONFIG_BLOCKS)
+    assert len(drifted) == 1
+    assert (drifted[0]["block"], drifted[0]["target"]) == ("two-word-block", "api")
+
+
+def test_a_kubeconfig_with_nothing_in_it_is_not_an_error():
+    assert tunnels.kubeconfig_profiles({}) == {}
+    assert tunnels.stale_context_profiles({}, KUBE_CONFIG_BLOCKS) == []

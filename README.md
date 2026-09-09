@@ -167,7 +167,8 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels config` | Open the existing config file. `--path` prints the path only |
 | `tunnels profiles` | List the accounts the config knows about |
 | `tunnels discover <profile>` | Build a config block by asking the account what it has |
-| `tunnels doctor` | Find leftover tunnels and AWS sessions. `--fix` cleans them up |
+| `tunnels doctor` | Find leftover tunnels, AWS sessions, and kubectl contexts pinned to the wrong profile. `--fix` cleans them up |
+| `tunnels auth` | Show how each profile logs in and how long its token has left. `--migrate` converts legacy SSO profiles so they refresh without a browser, `--login` renews them now, `--no-browser` prints the approval URL instead of opening one |
 | `tunnels logs <env> <target>` | Tail that tunnel's session log. `-f` follows it |
 | `tunnels update` | Check GitHub for a newer release and install it the way this copy was installed. `--yes` skips the prompt |
 

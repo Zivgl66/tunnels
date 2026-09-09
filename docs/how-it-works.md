@@ -115,3 +115,137 @@ It only ever closes sessions this tool started, matched against its own logs.
 Your interactive `aws ssm start-session` shells are left alone. Accounts you
 are not logged into, or that deny `ssm:DescribeSessions`, are skipped with a
 note rather than failing the run.
+
+## Logging in without a browser
+
+`tunnels` runs `aws sso login` when a profile's cached token is gone. Two
+separate things make that annoying, and only one of them is fixable.
+
+**The approval click is not removable.** AWS SSO uses the OAuth 2.0 device
+authorization grant. The CLI gets a device code, and a human approves it in a
+browser session that the CLI has no access to. That split is the point of the
+grant: whatever holds the device code must not also be able to grant consent,
+or a stolen code would be enough to mint credentials. "Auto approving" means
+driving the identity provider with the user's password and MFA, which is
+phishing with extra steps and is not something this tool will do.
+
+**How often it happens is very fixable.** A profile written the legacy way,
+with `sso_start_url` and `sso_region` set directly on the profile, receives an
+access token and no refresh token. When it expires — eight hours by default —
+the browser opens again. A profile pointing at an `[sso-session]` block
+receives a refresh token, and the CLI renews it in the background. The browser
+then opens only when the SSO session itself expires, which Identity Center can
+set as high as 90 days.
+
+```ini
+# before: no refresh token, browser every 8h
+[profile dev]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+
+# after: refreshes silently
+[sso-session acme]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_registration_scopes = sso:account:access
+
+[profile dev]
+sso_session = acme
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+```
+
+Same portal, same account, same permission set. `tunnels auth` reports which
+form each profile uses and how long its token has left; `tunnels auth
+--migrate` rewrites the first form into the second, writing a timestamped
+backup of `~/.aws/config` first. Profiles on one portal share a single session
+block, so one login covers all of them.
+
+The token cache is keyed by session name rather than start URL, so the first
+login after migrating cannot reuse the old cache entry. Expect one browser
+trip, then silence.
+
+**Over SSH there is no browser to open.** `aws sso login --no-browser` prints
+the URL and code to paste into a browser somewhere else. `tunnels` adds that
+flag on its own when it detects an SSH session, or Linux with no display; set
+`TUNNELS_NO_BROWSER=1` to force it, or pass `tunnels auth --no-browser`.
+
+**Profiles that are not SSO are left alone.** `credential_process`, `role_arn`
+with a `source_profile`, and static keys all renew by their own means, and
+running `aws sso login` against them does nothing useful. `tunnels` now says so
+instead of shelling out and failing.
+
+## Credentials as a fallback
+
+An SSO token that has run out stops a run to open a browser, which is fine at
+a desk and useless in a script. `fallback_profile` on a config block names a
+second profile to try first:
+
+```yaml
+dev:
+  profile: acme-dev            # sso, normally
+  fallback_profile: dev-creds  # used when that token is gone
+  region: eu-west-1
+```
+
+The order is: a valid cached token for `profile` wins; then `fallback_profile`;
+then an interactive login. So the browser is the last resort rather than the
+first response to an expired token.
+
+Point it at something that renews without a human — `credential_process`, a
+`role_arn` with a `source_profile`, or static keys. `tunnels auth` marks those
+"no browser, ever". A second SSO profile is allowed but only helps while its
+own token is alive.
+
+The profile that actually authenticated is what gets recorded in
+`~/.tunnels/state.json`, so `down` and `doctor` close the AWS session with the
+same credentials that opened it. Falling back changes which profile runs
+everything downstream — the EKS endpoint lookup and the SSM session included —
+not just the identity check.
+
+This mirrors what the AWS CLI itself does with `credential_process`, and what
+tools that offer "credentials or SSO" as a choice do: SSO is the good default,
+and there has to be a way through when it is not available.
+
+### The `-creds` convention
+
+Setting `fallback_profile` on every block by hand gets tedious once there are
+ten of them. A profile named `<primary>-creds` is picked up on its own:
+
+```ini
+[profile acme-dev]          # sso, as before
+sso_session = acme
+...
+
+[profile acme-dev-creds]    # found automatically, no yaml change
+aws_access_key_id     = AKIA...
+aws_secret_access_key = ...
+region                = eu-west-1
+```
+
+Creating the profile is the opt-in; there is nothing else to switch on. An
+explicit `fallback_profile` still wins where one is set. A `-creds` profile
+that is itself SSO-backed is ignored, because falling back to a second thing
+that also wants a browser buys nothing.
+
+### Kubeconfig left pointing at the fallback
+
+`aws eks update-kubeconfig --profile X` writes X into the context's exec
+block, so a kubeconfig entry remembers which profile wrote it. A tunnel that
+came up on the fallback therefore leaves `kubectl` using the credentials
+profile, and `down` deliberately does not touch contexts.
+
+The next `up` of that target rewrites it, but until then the pin is stale.
+`tunnels doctor` reports contexts pinned to a profile the config no longer
+asks for, and `doctor --fix` repoints them:
+
+```console
+$ tunnels doctor
+▲ 1 kubectl context(s) pinned to a different profile than the config asks for
+      tunnels-core-dev-eks-main: core-dev-creds → core-dev
+```
+
+Only `tunnels-<block>-<target>` contexts are considered. Anything else in the
+kubeconfig belongs to something else and is left alone.
