@@ -1786,3 +1786,232 @@ def test_update_does_not_prompt_when_there_is_no_terminal(monkeypatch):
 def test_update_yes_skips_the_prompt_without_a_terminal(monkeypatch):
     code, ran = _update(monkeypatch, tty=False, assume_yes=True)
     assert (code, ran) == (0, ["pipx"])
+
+
+# --- aws auth: what the browser trip actually costs, and when it is avoidable
+
+
+from tunnels_cli import awsauth  # noqa: E402
+
+
+LEGACY_CONFIG = """\
+[default]
+region = eu-west-1
+
+[profile dev]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+region = eu-west-1
+
+# a comment the migration must not eat
+[profile prd]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_account_id = 444455556666
+sso_role_name = ReadOnly
+region = eu-west-1
+
+[profile robot]
+credential_process = /usr/local/bin/creds
+
+[profile legacy-keys]
+aws_access_key_id = AKIAEXAMPLE
+"""
+
+MODERN_CONFIG = """\
+[sso-session acme]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+sso_registration_scopes = sso:account:access
+
+[profile dev]
+sso_session = acme
+sso_account_id = 111122223333
+sso_role_name = AdministratorAccess
+"""
+
+
+def _config(tmp_path, text):
+    path = tmp_path / "config"
+    path.write_text(text)
+    return path
+
+
+def test_auth_kind_reads_the_shape_not_the_name(tmp_path):
+    known = awsauth.profiles(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert awsauth.auth_kind(known["dev"]) == awsauth.SSO_LEGACY
+    assert awsauth.auth_kind(known["robot"]) == awsauth.PROCESS
+    assert awsauth.auth_kind(known["legacy-keys"]) == awsauth.STATIC
+    assert awsauth.auth_kind(known["default"]) == awsauth.UNKNOWN
+
+
+def test_sso_session_profiles_are_the_ones_that_refresh(tmp_path):
+    legacy = awsauth.profiles(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    modern = awsauth.profiles(awsauth.read_config(_config(tmp_path, MODERN_CONFIG)))
+    assert not awsauth.can_refresh_silently(legacy["dev"])
+    assert awsauth.can_refresh_silently(modern["dev"])
+
+
+def test_sso_login_is_meaningless_for_a_non_sso_profile(tmp_path):
+    known = awsauth.profiles(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert awsauth.can_sso_login(known["dev"])
+    assert not awsauth.can_sso_login(known["robot"])
+    assert not awsauth.can_sso_login(known["legacy-keys"])
+
+
+def test_migration_groups_every_profile_on_one_portal_into_one_session(tmp_path):
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert len(plan) == 1
+    assert plan[0]["session"] == "acme"
+    assert plan[0]["profiles"] == ["dev", "prd"]
+    assert plan[0]["start_url"] == "https://acme.awsapps.com/start"
+
+
+def test_migration_leaves_non_sso_and_already_migrated_profiles_alone(tmp_path):
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, MODERN_CONFIG)))
+    assert plan == []
+    legacy = awsauth.migration_plan(
+        awsauth.read_config(_config(tmp_path, LEGACY_CONFIG)))
+    assert "robot" not in legacy[0]["profiles"]
+
+
+def test_two_portals_get_two_sessions_with_distinct_names(tmp_path):
+    text = LEGACY_CONFIG + """
+[profile other]
+sso_start_url = https://other.awsapps.com/start
+sso_region = us-east-1
+"""
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, text)))
+    assert {g["session"] for g in plan} == {"acme", "other"}
+
+
+def test_migration_reuses_a_session_block_for_the_same_portal(tmp_path):
+    text = MODERN_CONFIG + """
+[profile stragglers]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+"""
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, text)))
+    assert len(plan) == 1
+    assert plan[0]["session"] == "acme"
+    assert plan[0]["new_block"] is False
+
+
+def test_applying_the_migration_produces_a_config_aws_can_read(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, LEGACY_CONFIG))
+    plan = awsauth.migration_plan(sections)
+    out = awsauth.apply_migration(LEGACY_CONFIG, plan)
+
+    after = awsauth.read_config(_config(tmp_path, out))
+    known = awsauth.profiles(after)
+    assert awsauth.auth_kind(known["dev"]) == awsauth.SSO_SESSION
+    assert awsauth.auth_kind(known["prd"]) == awsauth.SSO_SESSION
+    assert awsauth.can_refresh_silently(known["dev"])
+    # the session block carries what the profiles gave up
+    session = awsauth.sso_sessions(after)["acme"]
+    assert session["sso_start_url"] == "https://acme.awsapps.com/start"
+    assert session["sso_registration_scopes"] == "sso:account:access"
+
+
+def test_migration_keeps_everything_it_was_not_asked_to_change(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, LEGACY_CONFIG))
+    out = awsauth.apply_migration(LEGACY_CONFIG, awsauth.migration_plan(sections))
+    assert "# a comment the migration must not eat" in out
+
+    known = awsauth.profiles(awsauth.read_config(_config(tmp_path, out)))
+    # account id and role are what pick the permission set -- losing either
+    # silently changes which credentials the profile hands out
+    assert known["dev"]["sso_account_id"] == "111122223333"
+    assert known["dev"]["sso_role_name"] == "AdministratorAccess"
+    assert known["prd"]["sso_role_name"] == "ReadOnly"
+    assert known["robot"]["credential_process"] == "/usr/local/bin/creds"
+    assert "sso_start_url" not in known["dev"]
+
+
+def test_migration_is_a_no_op_the_second_time(tmp_path):
+    once = awsauth.apply_migration(
+        LEGACY_CONFIG,
+        awsauth.migration_plan(awsauth.read_config(_config(tmp_path, LEGACY_CONFIG))))
+    plan = awsauth.migration_plan(awsauth.read_config(_config(tmp_path, once)))
+    assert plan == []
+
+
+def test_token_status_reports_expiry_without_reading_the_token(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    body = {"sso_start_url": "https://acme.awsapps.com/start"}
+    name = awsauth._cache_path(body["sso_start_url"]).name
+    (cache / name).write_text(json.dumps({
+        "accessToken": "SECRET-MUST-NOT-BE-READ",
+        "expiresAt": "2026-01-01T12:00:00Z",
+    }))
+    now = time.mktime(time.strptime("2026-01-01 10:00:00", "%Y-%m-%d %H:%M:%S"))
+    status = awsauth.token_status(body, cache_dir=cache,
+                                  now=now - time.timezone)
+    assert status["found"] is True
+    assert status["refreshable"] is False
+    assert 7000 < status["seconds_left"] < 7400
+    assert "SECRET" not in json.dumps(status)
+
+
+def test_token_status_sees_a_refresh_token_on_a_migrated_profile(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    body = {"sso_session": "acme"}
+    sessions = {"acme": {"sso_start_url": "https://acme.awsapps.com/start"}}
+    (cache / awsauth._cache_path("acme").name).write_text(json.dumps({
+        "accessToken": "a", "refreshToken": "r", "expiresAt": "2026-01-01T12:00:00Z",
+    }))
+    status = awsauth.token_status(body, sessions, cache_dir=cache)
+    assert status["refreshable"] is True
+
+
+def test_token_status_is_blank_when_nothing_is_cached(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    status = awsauth.token_status({"sso_start_url": "https://nope/start"},
+                                  cache_dir=cache)
+    assert status == {"found": False, "expires_at": None,
+                      "seconds_left": None, "refreshable": False}
+
+
+def test_headless_detection_picks_ssh_and_bare_linux():
+    assert awsauth.headless({"SSH_CONNECTION": "1.2.3.4 1 5.6.7.8 22"})
+    assert awsauth.headless({"TUNNELS_NO_BROWSER": "1"})
+    assert not awsauth.headless({}) or sys.platform.startswith("linux")
+
+
+def test_login_refuses_a_profile_sso_cannot_help(monkeypatch):
+    monkeypatch.setattr(tunnels, "profile_settings",
+                        lambda profile: {"credential_process": "/bin/creds"})
+    ran = []
+    monkeypatch.setattr(tunnels.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.sso_login("robot", "eu-west-1")
+    assert "does not use SSO" in str(err.value)
+    assert ran == [], "must not shell out to aws sso login for a non-sso profile"
+
+
+def test_login_asks_for_no_browser_when_there_is_nowhere_to_open_one(monkeypatch):
+    seen = []
+
+    class Done:
+        returncode = 0
+
+    monkeypatch.setattr(tunnels, "profile_settings",
+                        lambda profile: {"sso_start_url": "https://acme/start"})
+    monkeypatch.setattr(tunnels.subprocess, "run",
+                        lambda cmd, **k: seen.append(cmd) or Done())
+    monkeypatch.setattr(tunnels, "aws",
+                        lambda *a, **k: {"Account": "111122223333"})
+
+    monkeypatch.setattr(tunnels.awsauth, "headless", lambda env=None: True)
+    assert tunnels.sso_login("dev", "eu-west-1") == "111122223333"
+    assert "--no-browser" in seen[0]
+
+    seen.clear()
+    monkeypatch.setattr(tunnels.awsauth, "headless", lambda env=None: False)
+    tunnels.sso_login("dev", "eu-west-1")
+    assert "--no-browser" not in seen[0]

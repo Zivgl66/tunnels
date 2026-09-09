@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from tunnels_cli import health, ui, update as updater
+from tunnels_cli import awsauth, health, ui, update as updater
 from tunnels_cli.menu import BACK as menu_back
 from tunnels_cli.menu import menu
 
@@ -343,9 +343,31 @@ def cached_account(profile):
     return json.loads(probe.stdout)["Account"]
 
 
-def sso_login(profile, region):
-    """Run the interactive login. Opens a browser and prints its own prompts."""
-    login = subprocess.run(["aws", "--profile", profile, "sso", "login"])
+def profile_settings(profile):
+    """One profile's block from ~/.aws/config, or {} if it is not there."""
+    return awsauth.profiles(awsauth.read_config()).get(profile, {})
+
+
+def sso_login(profile, region, no_browser=None):
+    """Run the interactive login. Prints its own prompts.
+
+    The approval step is a human one and stays that way: the device
+    authorization grant exists precisely so that whatever holds the device
+    code cannot also grant consent. `no_browser` only changes *where* the
+    approval happens -- pasting the URL elsewhere instead of opening a local
+    browser -- which is what makes this work over SSH.
+    """
+    settings = profile_settings(profile)
+    if settings and not awsauth.can_sso_login(settings):
+        raise TunnelError(
+            f"profile '{profile}' does not use SSO "
+            f"({awsauth.auth_kind(settings)}), so 'aws sso login' cannot "
+            f"refresh it. Renew its credentials the way that profile expects."
+        )
+    cmd = ["aws", "--profile", profile, "sso", "login"]
+    if awsauth.headless() if no_browser is None else no_browser:
+        cmd.append("--no-browser")
+    login = subprocess.run(cmd)
     if login.returncode != 0:
         raise TunnelError(f"aws sso login failed for profile '{profile}'")
     return aws(profile, region, "sts", "get-caller-identity")["Account"]
@@ -369,9 +391,15 @@ def resolve_account(profile, region):
     """
     with ui.Spinner(f"checking credentials for {profile}"):
         account = cached_account(profile)
+        settings = profile_settings(profile)
     if account:
         return account
     ui.warn(f"sso token missing or expired for '{profile}', logging in")
+    if awsauth.auth_kind(settings) == awsauth.SSO_LEGACY:
+        # Worth saying every time: this browser trip is avoidable, and the
+        # user has no way to know that from the prompt aws prints.
+        ui.info("      this profile cannot refresh silently. "
+                "'tunnels auth --migrate' fixes that")
     return sso_login(profile, region)
 
 
@@ -1395,6 +1423,113 @@ def cmd_doctor(fix):
     return 0
 
 
+def configured_profiles():
+    """Every profile named by the config, plus any live tunnel's, deduplicated."""
+    names = {e["profile"] for e in live_state() if e.get("profile")}
+    try:
+        config = load_config()
+    except TunnelError:
+        config = {}
+    for block in config.values():
+        if isinstance(block, dict) and block.get("profile"):
+            names.add(block["profile"])
+    return sorted(names)
+
+
+def _token_line(status):
+    """How long a cached token has left, in words."""
+    if not status["found"]:
+        return "no cached token"
+    left = status["seconds_left"]
+    if left is None:
+        return "cached"
+    if left <= 0:
+        return "expired"
+    return f"{ui.human_age(left)} left"
+
+
+def cmd_auth(migrate=False, login=False, no_browser=False):
+    """Report how each profile authenticates, and cut down the browser trips.
+
+    The approval click itself is not removable -- see awsauth's docstring --
+    so what this offers instead is: stop needing it every eight hours, and
+    stop needing a local browser for it at all.
+    """
+    print(ui.rule("auth"))
+    sections = awsauth.read_config()
+    if not sections:
+        ui.warn(f"no aws config at {awsauth.AWS_CONFIG}")
+        return 1
+    known = awsauth.profiles(sections)
+    sessions = awsauth.sso_sessions(sections)
+    wanted = configured_profiles()
+
+    if not wanted:
+        ui.info("  no profiles in the tunnels config, showing all of ~/.aws/config")
+        wanted = sorted(known)
+
+    rows = []
+    legacy = 0
+    for name in wanted:
+        body = known.get(name)
+        if body is None:
+            rows.append([name, "missing", "-", "not in ~/.aws/config"])
+            continue
+        kind = awsauth.auth_kind(body)
+        status = awsauth.token_status(body, sessions)
+        if kind == awsauth.SSO_LEGACY:
+            legacy += 1
+            note = "browser again at expiry"
+        elif kind == awsauth.SSO_SESSION:
+            note = "refreshes silently" if status["refreshable"] else "log in once to arm refresh"
+        else:
+            note = "not an sso profile"
+        rows.append([name, kind, _token_line(status), note])
+
+    print(ui.table(["profile", "auth", "token", "note"], rows))
+
+    plan = awsauth.migration_plan(sections)
+    if not plan:
+        ui.ok("every sso profile can refresh without a browser")
+    else:
+        print()
+        ui.warn(f"{legacy} profile(s) use the legacy sso format and cannot refresh")
+        for group in plan:
+            ui.info(f"      [sso-session {group['session']}] would cover "
+                    f"{len(group['profiles'])} profile(s) at {group['start_url']}")
+        if not migrate:
+            ui.info("  run 'tunnels auth --migrate' to convert them "
+                    "(a backup is written first)")
+
+    if migrate and plan:
+        path = awsauth.AWS_CONFIG
+        backup = path.with_suffix(path.suffix + f".bak-{int(time.time())}")
+        text = path.read_text()
+        backup.write_text(text)
+        path.write_text(awsauth.apply_migration(text, plan))
+        ui.ok(f"migrated. previous config saved as {backup.name}")
+        ui.info("  the next login arms the refresh token; after that the "
+                "browser only opens when the sso session itself expires")
+
+    if login:
+        print()
+        for name in wanted:
+            body = known.get(name) or {}
+            if not awsauth.can_sso_login(body):
+                continue
+            if cached_account(name):
+                ui.ok(f"{name}: already valid")
+                continue
+            # One portal backs every profile here, so the first login usually
+            # satisfies the rest without a second browser trip.
+            region = body.get("sso_region") or profile_region(name)
+            sso_login(name, region, no_browser=no_browser or None)
+            ui.ok(f"{name}: logged in")
+
+    print(ui.rule())
+    return 0
+
+
 def cmd_logs(config_name, target, follow):
     """Tail the session log for one tunnel, for when a jump host misbehaves."""
     path = LOG_DIR / f"{config_name}-{target}.log"
@@ -1481,6 +1616,8 @@ EPILOG = """examples:
   tunnels status               what is up right now
   tunnels logs dev api -f      follow one tunnel's session log
   tunnels down all             stop everything
+  tunnels auth                 how each profile logs in, and when it expires
+  tunnels auth --migrate       stop the browser opening every eight hours
 
 colour: off automatically when piped, or with --no-color / NO_COLOR=1
 """
@@ -1545,6 +1682,24 @@ def main(argv=None):
     doctor = sub.add_parser("doctor", help="find leftover tunnels and sessions")
     doctor.add_argument("--fix", action="store_true", help="clean up what it finds")
 
+    auth = sub.add_parser("auth", help="show how each profile logs in, and log in")
+    auth.add_argument(
+        "--migrate", action="store_true",
+        help="convert legacy sso profiles in ~/.aws/config to a shared "
+             "[sso-session] block, so the CLI can refresh them without a "
+             "browser. Writes a backup first",
+    )
+    auth.add_argument(
+        "--login", action="store_true",
+        help="log in now for any profile whose token has gone, so a later "
+             "'up' does not stop to ask",
+    )
+    auth.add_argument(
+        "--no-browser", action="store_true",
+        help="print the approval URL instead of opening a browser, for use "
+             "over ssh. Detected automatically when there is no display",
+    )
+
     disc = sub.add_parser("discover", help="build a config block from an account")
     disc.add_argument("profile", help="an SSO profile from ~/.aws/config")
     disc.add_argument("--region", help="defaults to the profile's region")
@@ -1581,6 +1736,8 @@ def main(argv=None):
             return cmd_init()
         if args.command == "doctor":
             return cmd_doctor(args.fix)
+        if args.command == "auth":
+            return cmd_auth(args.migrate, args.login, args.no_browser)
         if args.command == "discover":
             region = args.region or profile_region(args.profile)
             return cmd_discover(args.profile, region, args.name or args.profile)
