@@ -176,3 +176,35 @@ flag on its own when it detects an SSH session, or Linux with no display; set
 with a `source_profile`, and static keys all renew by their own means, and
 running `aws sso login` against them does nothing useful. `tunnels` now says so
 instead of shelling out and failing.
+
+## Credentials as a fallback
+
+An SSO token that has run out stops a run to open a browser, which is fine at
+a desk and useless in a script. `fallback_profile` on a config block names a
+second profile to try first:
+
+```yaml
+dev:
+  profile: acme-dev            # sso, normally
+  fallback_profile: dev-creds  # used when that token is gone
+  region: eu-west-1
+```
+
+The order is: a valid cached token for `profile` wins; then `fallback_profile`;
+then an interactive login. So the browser is the last resort rather than the
+first response to an expired token.
+
+Point it at something that renews without a human — `credential_process`, a
+`role_arn` with a `source_profile`, or static keys. `tunnels auth` marks those
+"no browser, ever". A second SSO profile is allowed but only helps while its
+own token is alive.
+
+The profile that actually authenticated is what gets recorded in
+`~/.tunnels/state.json`, so `down` and `doctor` close the AWS session with the
+same credentials that opened it. Falling back changes which profile runs
+everything downstream — the EKS endpoint lookup and the SSM session included —
+not just the identity check.
+
+This mirrors what the AWS CLI itself does with `credential_process`, and what
+tools that offer "credentials or SSO" as a choice do: SSO is the good default,
+and there has to be a way through when it is not available.

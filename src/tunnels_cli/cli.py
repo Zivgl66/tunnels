@@ -64,6 +64,15 @@ def config_block(config, name):
     for key in ("profile", "region", "targets"):
         if key not in block:
             raise TunnelError(f"config '{name}' is missing '{key}'")
+    spare = block.get("fallback_profile")
+    if spare is not None:
+        if not isinstance(spare, str) or not spare.strip():
+            raise TunnelError(
+                f"config '{name}': 'fallback_profile' must be a profile name")
+        if spare == block["profile"]:
+            raise TunnelError(
+                f"config '{name}': 'fallback_profile' is the same as "
+                f"'profile'. It is there to be tried when that one fails.")
     for target_name, target in block["targets"].items():
         validate_target(target_name, target)
         jump_for(block, target_name, target)   # raises if no jump applies
@@ -382,8 +391,17 @@ def ensure_sso(profile, region):
     return sso_login(profile, region)
 
 
-def resolve_account(profile, region):
-    """ensure_sso, with a spinner over the part that is safe to cover.
+def resolve_account(profile, region, fallback=None):
+    """Work out which profile to actually use, and what account it reaches.
+
+    Returns (account id, profile to use). The second value matters: every
+    later AWS call, and the state entry that `down` and `doctor` read to
+    close the session, must name the profile that really opened the tunnel.
+
+    Order is deliberate. A valid cached token wins. Then `fallback_profile`,
+    if the block names one that can renew itself -- that is the whole point
+    of setting it, to get past an expired SSO token without a browser. Only
+    then does it fall through to an interactive login.
 
     Only the cached-token probe runs under the spinner: `aws sso login`
     opens a browser and prints prompts of its own, and a spinner thread
@@ -393,14 +411,33 @@ def resolve_account(profile, region):
         account = cached_account(profile)
         settings = profile_settings(profile)
     if account:
-        return account
+        return account, profile
+
+    if fallback:
+        with ui.Spinner(f"trying fallback profile {fallback}"):
+            spare = cached_account(fallback)
+        if spare:
+            ui.warn(f"'{profile}' has no usable token, using '{fallback}' instead")
+            return spare, fallback
+        ui.warn(f"fallback profile '{fallback}' has no usable credentials either")
+
+    if settings and not awsauth.can_sso_login(settings):
+        # Nothing to log into. Say what kind of profile it is rather than
+        # running a login that cannot possibly help.
+        raise TunnelError(
+            f"profile '{profile}' ({awsauth.auth_kind(settings)}) has no "
+            f"working credentials, and 'aws sso login' does not apply to it. "
+            f"Renew it the way that profile expects, or set "
+            f"'fallback_profile' on this config block."
+        )
+
     ui.warn(f"sso token missing or expired for '{profile}', logging in")
     if awsauth.auth_kind(settings) == awsauth.SSO_LEGACY:
         # Worth saying every time: this browser trip is avoidable, and the
         # user has no way to know that from the prompt aws prints.
         ui.info("      this profile cannot refresh silently. "
                 "'tunnels auth --migrate' fixes that")
-    return sso_login(profile, region)
+    return sso_login(profile, region), profile
 
 
 def resolve_jump(profile, region, jump):
@@ -769,7 +806,12 @@ def cmd_up(config_name, target_names, keepalive=None, terraform=False, ttl=None)
     profile, region = block["profile"], block["region"]
 
     print(ui.rule(f"up {ui.paint(config_name, 'bold')}"))
-    account = resolve_account(profile, region)
+    account, profile = resolve_account(profile, region,
+                                       block.get("fallback_profile"))
+    # Everything downstream -- the eks lookup, the session, the state entry
+    # that 'down' closes it with -- has to use the profile that actually
+    # authenticated, not the one the config asked for first.
+    block = {**block, "profile": profile}
     ui.ok(f"account {ui.paint(account, 'bold')} "
           f"{ui.paint(ui.sym.dot, 'grey')} {profile} {ui.paint(ui.sym.dot, 'grey')} {region}")
 
@@ -1431,8 +1473,11 @@ def configured_profiles():
     except TunnelError:
         config = {}
     for block in config.values():
-        if isinstance(block, dict) and block.get("profile"):
-            names.add(block["profile"])
+        if not isinstance(block, dict):
+            continue
+        for key in ("profile", "fallback_profile"):
+            if block.get(key):
+                names.add(block[key])
     return sorted(names)
 
 
@@ -1482,6 +1527,8 @@ def cmd_auth(migrate=False, login=False, no_browser=False):
             note = "browser again at expiry"
         elif kind == awsauth.SSO_SESSION:
             note = "refreshes silently" if status["refreshable"] else "log in once to arm refresh"
+        elif awsauth.renews_without_a_human(body):
+            note = "no browser, ever"
         else:
             note = "not an sso profile"
         rows.append([name, kind, _token_line(status), note])

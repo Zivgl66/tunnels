@@ -1013,7 +1013,8 @@ def _stub_up(monkeypatch, tmp_path, config):
     """Neutralise everything cmd_up touches outside the target loop."""
     monkeypatch.setattr(tunnels, "load_config", lambda: config)
     monkeypatch.setattr(tunnels, "STATE_FILE", tmp_path / "state.json")
-    monkeypatch.setattr(tunnels, "resolve_account", lambda profile, region: "1234")
+    monkeypatch.setattr(tunnels, "resolve_account",
+                        lambda profile, region, fallback=None: ("1234", profile))
     monkeypatch.setattr(tunnels, "start_hud", lambda: None)
     monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
     return []
@@ -2015,3 +2016,117 @@ def test_login_asks_for_no_browser_when_there_is_nowhere_to_open_one(monkeypatch
     monkeypatch.setattr(tunnels.awsauth, "headless", lambda env=None: False)
     tunnels.sso_login("dev", "eu-west-1")
     assert "--no-browser" not in seen[0]
+
+
+# --- credentials as a fallback when the sso token has run out
+
+
+def _resolve(monkeypatch, cached, kinds=None, login=None):
+    """Drive resolve_account with a fake credential probe per profile."""
+    kinds = kinds or {}
+    monkeypatch.setattr(tunnels, "cached_account", lambda p: cached.get(p))
+    monkeypatch.setattr(tunnels, "profile_settings", lambda p: kinds.get(p, {}))
+    monkeypatch.setattr(
+        tunnels, "sso_login",
+        login or (lambda p, r, no_browser=None: ("logged-in", p)[0]))
+    return tunnels
+
+
+SSO_BODY = {"sso_start_url": "https://acme.awsapps.com/start"}
+CREDS_BODY = {"credential_process": "/usr/local/bin/creds"}
+
+
+def test_a_valid_token_uses_the_profile_the_config_asked_for(monkeypatch):
+    _resolve(monkeypatch, {"primary": "111122223333"}, {"primary": SSO_BODY})
+    assert tunnels.resolve_account("primary", "eu-west-1") == \
+        ("111122223333", "primary")
+
+
+def test_fallback_is_used_when_the_sso_token_is_gone(monkeypatch):
+    calls = []
+    _resolve(monkeypatch, {"spare": "444455556666"},
+             {"primary": SSO_BODY, "spare": CREDS_BODY},
+             login=lambda p, r, no_browser=None: calls.append(p) or "nope")
+    account, used = tunnels.resolve_account("primary", "eu-west-1", "spare")
+    assert (account, used) == ("444455556666", "spare")
+    assert calls == [], "the browser must not open when a fallback works"
+
+
+def test_fallback_is_not_reached_while_the_primary_token_is_good(monkeypatch):
+    probed = []
+    monkeypatch.setattr(tunnels, "profile_settings", lambda p: SSO_BODY)
+    monkeypatch.setattr(tunnels, "cached_account",
+                        lambda p: probed.append(p) or ("111122223333"
+                                                       if p == "primary" else None))
+    assert tunnels.resolve_account("primary", "eu-west-1", "spare")[1] == "primary"
+    assert probed == ["primary"], "a working primary must not probe the fallback"
+
+
+def test_a_dead_fallback_still_falls_through_to_an_interactive_login(monkeypatch):
+    _resolve(monkeypatch, {}, {"primary": SSO_BODY, "spare": CREDS_BODY},
+             login=lambda p, r, no_browser=None: "111122223333")
+    assert tunnels.resolve_account("primary", "eu-west-1", "spare") == \
+        ("111122223333", "primary")
+
+
+def test_a_non_sso_primary_with_no_creds_says_so_instead_of_logging_in(monkeypatch):
+    calls = []
+    _resolve(monkeypatch, {}, {"primary": CREDS_BODY},
+             login=lambda p, r, no_browser=None: calls.append(p) or "x")
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.resolve_account("primary", "eu-west-1")
+    assert "does not apply" in str(err.value)
+    assert "fallback_profile" in str(err.value)
+    assert calls == []
+
+
+def test_the_fallback_profile_is_what_gets_recorded_and_used(monkeypatch, tmp_path):
+    """The state entry drives 'down' and 'doctor'. It must name the real one."""
+    seen = {}
+    block = {"profile": "primary", "fallback_profile": "spare",
+             "region": "eu-west-1", "jump": "i-0abc",
+             "targets": {"db": {"host": "h", "port": 5432}}}
+    monkeypatch.setattr(tunnels, "load_config", lambda: {"dev": block})
+    monkeypatch.setattr(tunnels, "resolve_account",
+                        lambda p, r, f=None: ("444455556666", "spare"))
+    monkeypatch.setattr(tunnels, "live_state", lambda: [])
+    monkeypatch.setattr(tunnels, "start_watchdog", lambda minutes=None: False)
+    monkeypatch.setattr(
+        tunnels, "start_targets",
+        lambda cfg, pending, blk, account, entries: (
+            seen.update(profile=blk["profile"], account=account) or {}))
+
+    tunnels.cmd_up("dev", [])
+    assert seen["profile"] == "spare", \
+        "downstream calls must use the profile that authenticated"
+    assert seen["account"] == "444455556666"
+
+
+def test_config_rejects_a_fallback_that_is_the_same_as_the_profile():
+    bad = {"dev": {"profile": "p", "fallback_profile": "p", "region": "r",
+                   "jump": "i-0abc", "targets": {"db": {"host": "h", "port": 1}}}}
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.config_block(bad, "dev")
+    assert "same as" in str(err.value)
+
+
+def test_config_rejects_a_nonsense_fallback_value():
+    bad = {"dev": {"profile": "p", "fallback_profile": ["a"], "region": "r",
+                   "jump": "i-0abc", "targets": {"db": {"host": "h", "port": 1}}}}
+    with pytest.raises(tunnels.TunnelError) as err:
+        tunnels.config_block(bad, "dev")
+    assert "profile name" in str(err.value)
+
+
+def test_config_still_accepts_a_block_with_no_fallback():
+    ok = {"dev": {"profile": "p", "region": "r", "jump": "i-0abc",
+                  "targets": {"db": {"host": "h", "port": 1}}}}
+    assert tunnels.config_block(ok, "dev")["profile"] == "p"
+
+
+def test_profiles_that_renew_without_a_human_are_the_useful_fallbacks():
+    assert awsauth.renews_without_a_human(CREDS_BODY)
+    assert awsauth.renews_without_a_human({"role_arn": "arn:aws:iam::1:role/r"})
+    assert awsauth.renews_without_a_human({"aws_access_key_id": "AKIA"})
+    assert not awsauth.renews_without_a_human(SSO_BODY)
+    assert not awsauth.renews_without_a_human({"sso_session": "acme"})

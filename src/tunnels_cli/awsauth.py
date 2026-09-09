@@ -117,6 +117,16 @@ def can_refresh_silently(body):
     return auth_kind(body) == SSO_SESSION
 
 
+def renews_without_a_human(body):
+    """True when this profile can get fresh credentials with nobody watching.
+
+    Static keys do not expire. `credential_process` and an assumed role both
+    renew from something already on the machine. Only the SSO kinds need a
+    browser, and only when their cached token has run out.
+    """
+    return auth_kind(body) in (PROCESS, ASSUME_ROLE, STATIC)
+
+
 def _cache_path(key):
     """AWS names the token cache file sha1(key).json -- session name, or start URL."""
     return SSO_CACHE / f"{hashlib.sha1(key.encode()).hexdigest()}.json"
