@@ -208,3 +208,44 @@ not just the identity check.
 This mirrors what the AWS CLI itself does with `credential_process`, and what
 tools that offer "credentials or SSO" as a choice do: SSO is the good default,
 and there has to be a way through when it is not available.
+
+### The `-creds` convention
+
+Setting `fallback_profile` on every block by hand gets tedious once there are
+ten of them. A profile named `<primary>-creds` is picked up on its own:
+
+```ini
+[profile acme-dev]          # sso, as before
+sso_session = acme
+...
+
+[profile acme-dev-creds]    # found automatically, no yaml change
+aws_access_key_id     = AKIA...
+aws_secret_access_key = ...
+region                = eu-west-1
+```
+
+Creating the profile is the opt-in; there is nothing else to switch on. An
+explicit `fallback_profile` still wins where one is set. A `-creds` profile
+that is itself SSO-backed is ignored, because falling back to a second thing
+that also wants a browser buys nothing.
+
+### Kubeconfig left pointing at the fallback
+
+`aws eks update-kubeconfig --profile X` writes X into the context's exec
+block, so a kubeconfig entry remembers which profile wrote it. A tunnel that
+came up on the fallback therefore leaves `kubectl` using the credentials
+profile, and `down` deliberately does not touch contexts.
+
+The next `up` of that target rewrites it, but until then the pin is stale.
+`tunnels doctor` reports contexts pinned to a profile the config no longer
+asks for, and `doctor --fix` repoints them:
+
+```console
+$ tunnels doctor
+▲ 1 kubectl context(s) pinned to a different profile than the config asks for
+      tunnels-core-dev-eks-main: core-dev-creds → core-dev
+```
+
+Only `tunnels-<block>-<target>` contexts are considered. Anything else in the
+kubeconfig belongs to something else and is left alone.

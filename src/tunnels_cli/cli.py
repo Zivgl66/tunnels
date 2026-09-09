@@ -313,6 +313,75 @@ def patch_kubeconfig(kubeconfig, context_name, local_port, endpoint_host):
     raise TunnelError(f"kubeconfig has no cluster '{cluster_name}'")
 
 
+def kubeconfig_profiles(kubeconfig):
+    """{context name: AWS_PROFILE} for every context that pins one.
+
+    `aws eks update-kubeconfig --profile X` writes X into the user's exec
+    block, so a kubeconfig entry remembers which profile wrote it long after
+    the tunnel is gone. That is how a one-off fallback ends up pinning
+    kubectl to the credentials profile.
+    """
+    users = {}
+    for entry in kubeconfig.get("users") or []:
+        exec_block = ((entry.get("user") or {}).get("exec")) or {}
+        for var in exec_block.get("env") or []:
+            if var.get("name") == "AWS_PROFILE":
+                users[entry.get("name")] = var.get("value")
+    found = {}
+    for context in kubeconfig.get("contexts") or []:
+        user = (context.get("context") or {}).get("user")
+        if user in users:
+            found[context.get("name")] = users[user]
+    return found
+
+
+def stale_context_profiles(kubeconfig, config):
+    """Contexts this tool wrote that are pinned to the wrong profile.
+
+    Returns dicts carrying everything the fix needs, so nothing has to parse
+    the context name a second time. Only `tunnels-<block>-<target>` contexts
+    are considered; anything else in the kubeconfig belongs to somebody else
+    and is left alone.
+    """
+    pinned = kubeconfig_profiles(kubeconfig)
+    drifted = []
+    for context, profile in sorted(pinned.items()):
+        if not context.startswith("tunnels-"):
+            continue
+        rest = context[len("tunnels-"):]
+        # Block names may contain '-', so try every split rather than
+        # assuming the first one is the boundary.
+        for i, char in enumerate(rest):
+            if char != "-":
+                continue
+            block_name, target_name = rest[:i], rest[i + 1:]
+            block = config.get(block_name)
+            if not isinstance(block, dict):
+                continue
+            target = (block.get("targets") or {}).get(target_name)
+            if target is None:
+                continue
+            wanted = block.get("profile")
+            if wanted and wanted != profile:
+                drifted.append({
+                    "context": context, "pinned": profile, "wanted": wanted,
+                    "block": block_name, "target": target_name,
+                    "cluster": target.get("eks"), "region": block.get("region"),
+                })
+            break
+    return drifted
+
+
+def read_kubeconfig():
+    """The parsed kubeconfig, or None when there is not one to read."""
+    path = Path(os.environ.get("KUBECONFIG", Path.home() / ".kube" / "config"))
+    try:
+        with path.open() as handle:
+            return yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+
+
 def write_kubeconfig_patch(context_name, local_port, host):
     """Read ~/.kube/config, patch it, write it back."""
     path = Path(os.environ.get("KUBECONFIG", Path.home() / ".kube" / "config"))
@@ -352,9 +421,31 @@ def cached_account(profile):
     return json.loads(probe.stdout)["Account"]
 
 
+#: A profile named "<primary>-creds" is used as a fallback with no config
+#: change. Naming it is the opt-in; there is nothing else to set.
+FALLBACK_SUFFIX = "-creds"
+
+
 def profile_settings(profile):
     """One profile's block from ~/.aws/config, or {} if it is not there."""
     return awsauth.profiles(awsauth.read_config()).get(profile, {})
+
+
+def conventional_fallback(profile, sections=None):
+    """'<profile>-creds', when it exists and can renew without a human.
+
+    Saves setting `fallback_profile` on every block by hand: creating the
+    profile is itself the opt-in. A profile that cannot renew unattended is
+    ignored, because falling back to a second thing that also wants a
+    browser buys nothing.
+    """
+    if not profile or profile.endswith(FALLBACK_SUFFIX):
+        return None
+    if sections is None:
+        sections = awsauth.read_config()
+    name = f"{profile}{FALLBACK_SUFFIX}"
+    body = awsauth.profiles(sections).get(name)
+    return name if body and awsauth.renews_without_a_human(body) else None
 
 
 def sso_login(profile, region, no_browser=None):
@@ -412,6 +503,10 @@ def resolve_account(profile, region, fallback=None):
         settings = profile_settings(profile)
     if account:
         return account, profile
+
+    # An explicit fallback_profile wins; otherwise fall back on the naming
+    # convention, so a block needs no edit to gain one.
+    fallback = fallback or conventional_fallback(profile)
 
     if fallback:
         with ui.Spinner(f"trying fallback profile {fallback}"):
@@ -1415,6 +1510,36 @@ def cmd_doctor(fix):
             ui.ok("stopped")
     else:
         ui.ok("no stray port forward processes")
+
+    # A tunnel that came up on a fallback profile leaves that profile written
+    # into the kubeconfig, and 'down' deliberately does not touch contexts.
+    # Left alone, kubectl keeps using the credentials profile after the SSO
+    # one is healthy again.
+    kubeconfig = read_kubeconfig()
+    try:
+        cfg_for_kube = load_config()
+    except TunnelError:
+        cfg_for_kube = {}
+    drifted = stale_context_profiles(kubeconfig, cfg_for_kube) if kubeconfig else []
+    if drifted:
+        problems += len(drifted)
+        ui.warn(f"{len(drifted)} kubectl context(s) pinned to a different "
+                f"profile than the config asks for")
+        for item in drifted:
+            ui.info(f"      {item['context']}: {item['pinned']} "
+                    f"{ui.sym.arrow} {item['wanted']}")
+        if fix:
+            for item in drifted:
+                if not item["cluster"]:
+                    continue      # only EKS targets have a kubeconfig entry
+                try:
+                    update_kubeconfig(item["wanted"], item["region"],
+                                      item["cluster"], item["context"])
+                    ui.ok(f"{item['context']} repointed at {item['wanted']}")
+                except TunnelError as exc:
+                    ui.warn(f"{item['context']}: could not repoint ({exc})")
+    elif kubeconfig is not None:
+        ui.ok("no kubectl contexts pinned to the wrong profile")
 
     ours = our_session_ids()
     live_ids = {e.get("session_id") for e in entries if e.get("session_id")}

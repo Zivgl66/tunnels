@@ -2130,3 +2130,134 @@ def test_profiles_that_renew_without_a_human_are_the_useful_fallbacks():
     assert awsauth.renews_without_a_human({"aws_access_key_id": "AKIA"})
     assert not awsauth.renews_without_a_human(SSO_BODY)
     assert not awsauth.renews_without_a_human({"sso_session": "acme"})
+
+
+# --- the -creds convention, and kubeconfig left pinned to a fallback profile
+
+
+CONV_CONFIG = """\
+[profile dev]
+sso_start_url = https://acme.awsapps.com/start
+sso_region = eu-west-1
+
+[profile dev-creds]
+aws_access_key_id = AKIAEXAMPLE
+aws_secret_access_key = shh
+region = eu-west-1
+
+[profile tst]
+sso_start_url = https://acme.awsapps.com/start
+
+[profile tst-creds]
+sso_start_url = https://acme.awsapps.com/start
+"""
+
+
+def test_a_creds_profile_is_picked_up_without_touching_the_config(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("dev", sections) == "dev-creds"
+
+
+def test_a_fallback_that_also_needs_a_browser_is_not_worth_having(tmp_path):
+    """tst-creds is itself an SSO profile, so it solves nothing."""
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("tst", sections) is None
+
+
+def test_no_creds_profile_means_no_convention_fallback(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("missing", sections) is None
+
+
+def test_a_creds_profile_does_not_look_for_its_own_creds_profile(tmp_path):
+    sections = awsauth.read_config(_config(tmp_path, CONV_CONFIG))
+    assert tunnels.conventional_fallback("dev-creds", sections) is None
+
+
+def test_resolve_uses_the_convention_when_no_fallback_is_configured(monkeypatch):
+    _resolve(monkeypatch, {"primary-creds": "444455556666"},
+             {"primary": SSO_BODY},
+             login=lambda p, r, no_browser=None: pytest.fail("should not log in"))
+    monkeypatch.setattr(tunnels, "conventional_fallback",
+                        lambda p, sections=None: f"{p}-creds")
+    assert tunnels.resolve_account("primary", "eu-west-1") == \
+        ("444455556666", "primary-creds")
+
+
+def test_an_explicit_fallback_beats_the_convention(monkeypatch):
+    _resolve(monkeypatch, {"chosen": "111122223333", "primary-creds": "999"},
+             {"primary": SSO_BODY})
+    monkeypatch.setattr(tunnels, "conventional_fallback",
+                        lambda p, sections=None: f"{p}-creds")
+    assert tunnels.resolve_account("primary", "eu-west-1", "chosen")[1] == "chosen"
+
+
+KUBECONFIG = {
+    "contexts": [
+        {"name": "tunnels-core-dev-eks-main",
+         "context": {"cluster": "c1", "user": "u1"}},
+        {"name": "tunnels-two-word-block-api",
+         "context": {"cluster": "c2", "user": "u2"}},
+        {"name": "someone-elses-context",
+         "context": {"cluster": "c3", "user": "u3"}},
+    ],
+    "users": [
+        {"name": "u1", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "core-dev-creds"}]}}},
+        {"name": "u2", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "two-word-profile"}]}}},
+        {"name": "u3", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "unrelated-creds"}]}}},
+    ],
+}
+
+KUBE_CONFIG_BLOCKS = {
+    "core-dev": {"profile": "core-dev", "region": "eu-west-1",
+                 "targets": {"eks-main": {"eks": "cluster-one"}}},
+    "two-word-block": {"profile": "two-word-profile", "region": "eu-west-1",
+                       "targets": {"api": {"eks": "cluster-two"}}},
+}
+
+
+def test_kubeconfig_profiles_reads_the_pin_out_of_the_exec_block():
+    found = tunnels.kubeconfig_profiles(KUBECONFIG)
+    assert found["tunnels-core-dev-eks-main"] == "core-dev-creds"
+    assert found["someone-elses-context"] == "unrelated-creds"
+
+
+def test_a_context_left_on_the_fallback_profile_is_reported():
+    drifted = tunnels.stale_context_profiles(KUBECONFIG, KUBE_CONFIG_BLOCKS)
+    assert len(drifted) == 1
+    item = drifted[0]
+    assert item["context"] == "tunnels-core-dev-eks-main"
+    assert (item["pinned"], item["wanted"]) == ("core-dev-creds", "core-dev")
+    # carried so the fix does not have to parse the context name again
+    assert (item["cluster"], item["region"]) == ("cluster-one", "eu-west-1")
+
+
+def test_a_context_on_the_right_profile_is_not_reported():
+    assert all(d["block"] != "two-word-block"
+               for d in tunnels.stale_context_profiles(KUBECONFIG, KUBE_CONFIG_BLOCKS))
+
+
+def test_contexts_this_tool_did_not_write_are_left_alone():
+    drifted = tunnels.stale_context_profiles(KUBECONFIG, KUBE_CONFIG_BLOCKS)
+    assert "someone-elses-context" not in [d["context"] for d in drifted]
+
+
+def test_block_names_containing_a_dash_still_resolve():
+    """'tunnels-two-word-block-api' must split at the right dash."""
+    kube = {
+        "contexts": [{"name": "tunnels-two-word-block-api",
+                      "context": {"cluster": "c", "user": "u"}}],
+        "users": [{"name": "u", "user": {"exec": {"env": [
+            {"name": "AWS_PROFILE", "value": "stale"}]}}}],
+    }
+    drifted = tunnels.stale_context_profiles(kube, KUBE_CONFIG_BLOCKS)
+    assert len(drifted) == 1
+    assert (drifted[0]["block"], drifted[0]["target"]) == ("two-word-block", "api")
+
+
+def test_a_kubeconfig_with_nothing_in_it_is_not_an_error():
+    assert tunnels.kubeconfig_profiles({}) == {}
+    assert tunnels.stale_context_profiles({}, KUBE_CONFIG_BLOCKS) == []
