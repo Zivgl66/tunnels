@@ -1140,6 +1140,12 @@ def start_watchdog(minutes=None):
     return True
 
 
+# The last row of the target list: a switch, not a target. Picking it turns
+# on what --terraform does for whatever is started next.
+TERRAFORM_OFF = "[ ] --terraform (also patch /etc/hosts)"
+TERRAFORM_ON = "[x] --terraform (also patch /etc/hosts)"
+
+
 def cmd_interactive():
     """No subcommand given: pick an account and a target, then act on it."""
     print(ui.banner(f"AWS SSM tunnels {ui.sym.dot} v{_version()}"))
@@ -1164,12 +1170,14 @@ def cmd_interactive():
 
         block = config_block(config, account)
         target_names = sorted(block["targets"])
+        terraform = False
 
         while True:
+            toggle = TERRAFORM_ON if terraform else TERRAFORM_OFF
             choices = [
                 f"{n} {ui.sym.up}" if f"{account}/{n}" in live else n
                 for n in target_names
-            ] + ["all"]
+            ] + ["all", toggle]
 
             target = menu(f"Which target in '{account}'?", choices,
                           allow_back=True)
@@ -1177,10 +1185,16 @@ def cmd_interactive():
                 break             # back / q: return to the account list
             if target is None:
                 return 0          # ctrl-c: stop here
+            if target == toggle:
+                # Not a target: flip the mode and show the same list again,
+                # so the default path stays at two picks.
+                terraform = not terraform
+                continue
             target = target.replace(f" {ui.sym.up}", "")
 
             if target == "all" or f"{account}/{target}" not in live:
-                return cmd_up(account, [] if target == "all" else [target])
+                return cmd_up(account, [] if target == "all" else [target],
+                              terraform=terraform)
 
             # Already up: starting it again is not what picking it means.
             action = menu(f"{account}/{target} is up", ["restart", "stop"],
@@ -1193,7 +1207,7 @@ def cmd_interactive():
             code = cmd_down(account, [target])
             if action == "stop" or code != 0:
                 return code
-            return cmd_up(account, [target])
+            return cmd_up(account, [target], terraform=terraform)
 
 
 PLANS = {
