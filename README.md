@@ -156,10 +156,10 @@ Full config reference: [docs/configuration.md](docs/configuration.md).
 | `tunnels up <env>` | Start every target in that config block |
 | `tunnels up <env> <target>...` | Start only the named targets |
 | `tunnels up <env> --keepalive [SECONDS]` | Also keep the sessions from idling out. Default 300s. Off unless asked for |
-| `tunnels up <env> --terraform` | Also patch `/etc/hosts` so the real hostname resolves to `127.0.0.1`, for tools (e.g. terraform's kubernetes/helm providers) that dial the real hostname instead of using the patched kubeconfig. Needs `sudo`. Removed again on `down` |
+| `tunnels up <env> --terraform` | Also patch `/etc/hosts` so the real hostname resolves to `127.0.0.1`, for tools (e.g. terraform's kubernetes/helm providers) that dial the real hostname instead of using the patched kubeconfig. Needs `sudo`. Removed again on `down`. While it is on, `status` and the HUD mark the tunnel with `⚑` |
 | `tunnels up <env> --ttl [MINUTES]` | Also auto-close tunnels after this long, healthy or not. A dead tunnel is always cleared automatically, with or without this flag |
 | `tunnels` (no args) | Interactive picker: pick an account, then a target or `all`, and start it. The last row, `[ ] --terraform`, is a switch: pick it to start the next target with `--terraform`. Picking a target that is already up offers `restart` or `stop`. `/` filters the list as you type, `←`/`b`/`q` step back a level, ctrl-c quits |
-| `tunnels status` | List live tunnels, with a health dot per tunnel |
+| `tunnels status` | List live tunnels, with a health dot per tunnel. `⚑` next to the port means `/etc/hosts` is patched for it (`--terraform`) |
 | `tunnels down <env>` | Stop that config's tunnels, free the ports, close the AWS sessions |
 | `tunnels down all` | Stop everything |
 | `tunnels hud` | Turn the floating label on or off |

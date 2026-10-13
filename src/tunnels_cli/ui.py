@@ -80,9 +80,10 @@ class _Symbols:
 
     FANCY = {"ok": "✔", "bad": "✘", "warn": "▲", "dot": "·",
              "arrow": "→", "bullet": "•", "line": "─",
-             "up": "●", "spin": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"}
+             "up": "●", "hosts": "⚑", "spin": "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"}
     PLAIN = {"ok": "+", "bad": "x", "warn": "!", "dot": "-", "arrow": "->",
-             "bullet": "*", "line": "-", "up": "o", "spin": "|/-\\"}
+             "bullet": "*", "line": "-", "up": "o", "hosts": "#",
+             "spin": "|/-\\"}
 
     def __getattr__(self, name):
         table = self.FANCY if unicode_on() else self.PLAIN

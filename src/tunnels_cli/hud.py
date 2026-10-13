@@ -122,7 +122,8 @@ def read_entries():
 
 
 def lines_for(entries):
-    """One short line per tunnel: dot, config/target, port, account tail."""
+    """One short line per tunnel: dot, config/target, port, account tail,
+    and a flag when --terraform pointed the real hostname at 127.0.0.1."""
     rows = []
     colors = assign_colors(e["key"] for e in entries)
     for entry in sorted(entries, key=lambda e: e["key"]):
@@ -134,6 +135,8 @@ def lines_for(entries):
             f"{'●' if live else '○'} {entry['config']}/{entry['target']} "
             f":{entry['local_port']} ·{account}"
         )
+        if entry.get("hosts_entry"):
+            text += " ⚑"
         rows.append((text, colors[entry["key"]] if live else DEAD))
     return rows
 
