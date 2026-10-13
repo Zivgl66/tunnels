@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-13
+
 ### Added
 - The interactive picker (`tunnels` with no args) can start targets with
   `--terraform`. The target list ends with a `[ ] --terraform` row; pick it to
