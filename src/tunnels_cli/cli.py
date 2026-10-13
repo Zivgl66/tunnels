@@ -1021,13 +1021,18 @@ def cmd_status():
         ui.info(f"no tunnels up {ui.sym.dot} start one with 'tunnels up <config>'")
         return 0
     rows = []
+    flagged = False
     for entry in sorted(entries, key=lambda e: e["key"]):
         where = entry["cluster"] or f"{entry['remote_host']}:{entry['remote_port']}"
         healthy = health.port_answers(entry["local_port"], timeout=0.5)
+        port = ui.paint(f":{entry['local_port']}", "green" if healthy else "grey")
+        if entry.get("hosts_entry"):
+            flagged = True
+            port += " " + ui.paint(ui.sym.hosts, "yellow")
         rows.append([
             ui.paint(ui.sym.up, "green" if healthy else "red"),
             ui.paint(entry["key"], "bright_cyan", "bold"),
-            ui.paint(f":{entry['local_port']}", "green" if healthy else "grey"),
+            port,
             entry["account"],
             shorten(where),
             ui.paint(entry["context"], "magenta") if entry["context"]
@@ -1037,6 +1042,10 @@ def cmd_status():
     print(ui.rule(f"{len(rows)} tunnel(s) up"))
     print(ui.table(["", "TUNNEL", "PORT", "ACCOUNT", "TARGET", "CONTEXT", "AGE"],
                    rows))
+    if flagged:
+        # The flag is a symbol, so say once what it means.
+        ui.info(f"{ui.sym.hosts} /etc/hosts points the real hostname at 127.0.0.1 "
+                f"(--terraform), until 'tunnels down'")
     return 0
 
 

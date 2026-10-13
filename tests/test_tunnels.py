@@ -817,6 +817,49 @@ def test_hud_falls_back_when_its_screen_is_unplugged():
     assert hud.choose_screen(attached, SCREENS[0], remembered) == SCREENS[0]
 
 
+def _hud_entry(target, hosts_entry=False):
+    return {"key": f"dev/{target}", "config": "dev", "target": target,
+            "local_port": 15432, "account": "123456789012",
+            "hosts_entry": hosts_entry}
+
+
+def test_hud_flags_a_tunnel_that_patched_etc_hosts(monkeypatch):
+    hud = _hud()
+    monkeypatch.setattr(hud, "port_answers", lambda *a, **k: True)
+    rows = hud.lines_for([_hud_entry("db", hosts_entry=True), _hud_entry("api")])
+    texts = dict((t.split()[1], t) for t, _ in rows)
+    assert texts["dev/db"].endswith(" ⚑"), texts
+    assert "⚑" not in texts["dev/api"], texts
+
+
+def _status_entry(target, hosts_entry=False):
+    return {"key": f"dev/{target}", "config": "dev", "target": target,
+            "local_port": 15432, "started": time.time() - 60,
+            "account": "1234", "cluster": None, "context": None,
+            "remote_host": "h", "remote_port": 5432, "hosts_entry": hosts_entry}
+
+
+def test_status_flags_hosts_entries_and_explains_the_flag(monkeypatch, capsys):
+    monkeypatch.setattr(tunnels, "live_state",
+                        lambda: [_status_entry("db", hosts_entry=True),
+                                 _status_entry("api")])
+    monkeypatch.setattr(tunnels.health, "port_answers", lambda *a, **k: True)
+    tunnels.cmd_status()
+    out = capsys.readouterr().out
+    rows = {l.split()[1]: l for l in out.splitlines() if "dev/" in l}
+    flag = tunnels.ui.sym.hosts
+    assert flag in rows["dev/db"], out
+    assert flag not in rows["dev/api"], out
+    assert "/etc/hosts" in out
+
+
+def test_status_has_no_flag_legend_without_hosts_entries(monkeypatch, capsys):
+    monkeypatch.setattr(tunnels, "live_state", lambda: [_status_entry("api")])
+    monkeypatch.setattr(tunnels.health, "port_answers", lambda *a, **k: True)
+    tunnels.cmd_status()
+    assert "/etc/hosts" not in capsys.readouterr().out
+
+
 from tunnels_cli.menu import menu  # noqa: E402
 
 
