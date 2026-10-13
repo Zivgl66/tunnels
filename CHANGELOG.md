@@ -6,6 +6,8 @@ and this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-13
+
 ### Added
 - `tunnels status` and the HUD mark a tunnel started with `--terraform` with
   `⚑`, so a patched `/etc/hosts` is visible while it is on. `status` adds a
