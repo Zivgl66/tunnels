@@ -854,7 +854,7 @@ def test_cmd_interactive_picks_account_then_all_targets(monkeypatch):
     monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
     picks = iter(["dev", "all"])
     monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
-    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, **kw: calls.append((config, targets)) or 0)
 
     result = tunnels.cmd_interactive()
 
@@ -867,7 +867,7 @@ def test_cmd_interactive_picks_account_then_one_target(monkeypatch):
     monkeypatch.setattr(tunnels, "load_config", lambda: GOOD)
     picks = iter(["dev", "db"])
     monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
-    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, **kw: calls.append((config, targets)) or 0)
 
     tunnels.cmd_interactive()
 
@@ -888,7 +888,7 @@ def test_cmd_interactive_back_at_target_step_returns_to_account_step(monkeypatch
     # account, target(back), account again, target
     picks = iter(["dev", tunnels.menu_back, "dev", "db"])
     monkeypatch.setattr(tunnels, "menu", lambda title, options, **kw: next(picks))
-    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, keepalive=None: calls.append((config, targets)) or 0)
+    monkeypatch.setattr(tunnels, "cmd_up", lambda config, targets, **kw: calls.append((config, targets)) or 0)
 
     result = tunnels.cmd_interactive()
 
@@ -1465,11 +1465,12 @@ def _live(key="dev/db", config="dev", target="db", port=15432, age=720):
 
 def _picker(monkeypatch, picks, entries=(), config=None):
     """Drive cmd_interactive with canned menu answers; record what it did."""
-    done = {"up": [], "down": []}
+    done = {"up": [], "down": [], "terraform": []}
     monkeypatch.setattr(tunnels, "load_config", lambda: config or GOOD)
     monkeypatch.setattr(tunnels, "live_state", lambda: list(entries))
     monkeypatch.setattr(tunnels, "cmd_up",
-                        lambda c, t, keepalive=None: done["up"].append((c, t)) or 0)
+                        lambda c, t, terraform=False, **kw:
+                        done["up"].append((c, t)) or done["terraform"].append(terraform) or 0)
     monkeypatch.setattr(tunnels, "cmd_down",
                         lambda c, t: done["down"].append((c, t)) or 0)
     shown = []
@@ -1527,6 +1528,35 @@ def test_picker_all_still_starts_everything_even_with_one_up(monkeypatch):
     out = _picker(monkeypatch, ["dev", "all"], entries=[_live()])
     assert out["up"] == [("dev", [])]
     assert out["down"] == []
+
+
+def test_picker_starts_without_terraform_by_default(monkeypatch):
+    out = _picker(monkeypatch, ["dev", "db"])
+    assert out["terraform"] == [False]
+    assert out["shown"][1][1][-1] == tunnels.TERRAFORM_OFF
+
+
+def test_picker_terraform_toggle_turns_it_on_for_the_next_start(monkeypatch):
+    out = _picker(monkeypatch, ["dev", tunnels.TERRAFORM_OFF, "db"])
+    # the target list is shown again, now with the switch on
+    assert out["shown"][2][1][-1] == tunnels.TERRAFORM_ON
+    assert out["up"] == [("dev", ["db"])]
+    assert out["terraform"] == [True]
+
+
+def test_picker_terraform_toggle_flips_back_off(monkeypatch):
+    out = _picker(monkeypatch,
+                  ["dev", tunnels.TERRAFORM_OFF, tunnels.TERRAFORM_ON, "all"])
+    assert out["up"] == [("dev", [])]
+    assert out["terraform"] == [False]
+
+
+def test_picker_restart_keeps_the_terraform_switch(monkeypatch):
+    out = _picker(monkeypatch,
+                  ["dev", tunnels.TERRAFORM_OFF, f"db {tunnels.ui.sym.up}", "restart"],
+                  entries=[_live()])
+    assert out["down"] == [("dev", ["db"])]
+    assert out["terraform"] == [True]
 
 
 def test_picker_all_row_wins_over_a_target_actually_named_all(monkeypatch):
